@@ -1,0 +1,155 @@
+nexthop Unit Test Plan
+========================
+Generated: 2026-05-06
+Author: Anthropic Claude (Sonnet 4.6)
+
+Legend: [x] = complete   [ ] = pending
+
+Scope
+─────
+Tests live in #[cfg(test)] mod tests blocks inside each source file.
+All tests compile under `cargo test --no-fail-fast`.
+GUI rendering tests (egui widgets) are out of scope — they require a
+headless display server. Pure functions in GUI modules ARE tested.
+Network multicast tests are out of scope — environment-dependent.
+main.rs is not tested directly — entry points require process::exit stubs.
+
+────────────────────────────────────────────────────────────────────
+Module: src/error.rs                                      (4 tests)
+────────────────────────────────────────────────────────────────────
+[x] display_config_error          — RelayError::Config message includes text
+[x] display_io_error_prefix       — RelayError::Io starts with "I/O error:"
+[x] display_addr_parse_prefix     — RelayError::AddrParse starts with "address parse error:"
+[x] from_io_error_conversion      — std::io::Error converts to RelayError::Io via From
+
+────────────────────────────────────────────────────────────────────
+Module: src/stats.rs                                      (8 tests: 3 existing + 5 new)
+────────────────────────────────────────────────────────────────────
+[x] counters_are_atomic           *** existing ***
+[x] conn_open_close               *** existing ***
+[x] conn_close_saturates_at_zero  *** existing ***
+[x] snapshot_label_matches        — snapshot.label equals Stats label
+[x] snapshot_captures_all_counters — all fields reflect prior operations
+[x] snapshot_at_is_nonzero        — Unix timestamp > 0
+[x] snapshot_serializes_to_json   — serde_json round-trip contains expected keys
+[x] active_never_exceeds_total    — invariant: active_conns <= total_conns
+
+────────────────────────────────────────────────────────────────────
+Module: src/rate_limiter.rs                               (5 tests: 2 existing + 3 new)
+────────────────────────────────────────────────────────────────────
+[x] immediate_acquire_within_burst  *** existing ***
+[x] acquire_waits_when_exhausted    *** existing ***
+[x] acquire_zero_bytes_is_immediate — acquire(0) never blocks even with empty bucket
+[x] tokens_do_not_exceed_max        — burst cap holds after refill
+[x] large_burst_initial_acquire     — burst >> rate allows big initial acquire immediately
+
+────────────────────────────────────────────────────────────────────
+Module: src/config.rs                                    (21 tests: 8 existing + 13 new)
+────────────────────────────────────────────────────────────────────
+[x] parse_minimal_tcp_tcp           *** existing ***
+[x] parse_cross_protocol            *** existing ***
+[x] reject_empty_destinations       *** existing ***
+[x] reject_tcp_multicast_destination *** existing ***
+[x] reject_tcp_multicast_source     *** existing ***
+[x] reject_zero_rate                *** existing ***
+[x] default_values_applied          *** existing ***
+[x] roundtrip_toml                  *** existing ***
+[x] display_name_uses_name_field    — returns name if Some
+[x] display_name_falls_back_to_address — returns address if name is None
+[x] reconnect_delay_default_is_2000ms — None → 2 seconds
+[x] reconnect_delay_custom          — custom ms value honoured
+[x] socket_addr_parses_ipv4         — valid "127.0.0.1:8080"
+[x] socket_addr_parses_ipv6         — valid "[::1]:8080"
+[x] socket_addr_rejects_invalid     — "not-an-address" returns Err
+[x] reject_zero_max_payload         — validate() rejects max_payload_size = 0
+[x] reject_invalid_multicast_iface_source  — "eth0" is not IPv4
+[x] reject_invalid_multicast_iface_dest    — "eth0" is not IPv4
+[x] from_file_missing_returns_error — non-existent path → Err
+[x] toml_string_escapes_quotes_in_name — special chars survive round-trip
+[x] dest_config_deref_reaches_base  — DestConfig Deref → socket_addr works
+
+────────────────────────────────────────────────────────────────────
+Module: src/prefs.rs                                      (5 tests)
+────────────────────────────────────────────────────────────────────
+[x] load_missing_file_returns_default — missing path → Ok(default)
+[x] load_invalid_toml_returns_error   — corrupt file → Err with message
+[x] load_valid_toml_parses_correctly  — well-formed TOML → correct fields
+[x] save_and_load_round_trip          — save → load identity for custom values
+[x] default_values_are_reasonable     — dark_mode true, scale 1.0, sizes > 0
+
+────────────────────────────────────────────────────────────────────
+Module: src/transport.rs                                  (4 tests)
+────────────────────────────────────────────────────────────────────
+[x] bind_tcp_listener_assigns_real_port — port 0 → OS-assigned port > 0
+[x] bind_tcp_listener_two_port_zero     — two simultaneous binds succeed independently
+[x] bind_udp_recv_unicast_ipv4          — unicast recv socket binds and has port
+[x] bind_udp_send_unicast_ipv4          — unicast send socket binds successfully
+
+────────────────────────────────────────────────────────────────────
+Module: src/relay.rs                                      (9 tests)
+────────────────────────────────────────────────────────────────────
+[x] relay_new_creates_correct_stats_labels — source and dest labels well-formed
+[x] relay_new_stats_count_matches_destinations — dest_stats.len() == cfg.destinations.len()
+[x] send_to_all_drop_newest_increments_dropped — full channel → dropped counter +1
+[x] send_to_all_block_delivers_when_space_available — block policy delivers data
+[x] apply_hot_reload_installs_rate_limiter — new rate limit set in SharedLimiter
+[x] apply_hot_reload_removes_rate_limiter  — config without rate limit clears slot
+[x] health_endpoint_returns_200     — GET /health → 200 + {"status":"ok"}
+[x] stats_endpoint_returns_json     — GET /stats  → 200 + JSON array with rx_bytes
+[x] unknown_path_returns_404        — GET /unknown → 404
+
+────────────────────────────────────────────────────────────────────
+Module: src/gui/monitor_page.rs                          (12 tests)
+────────────────────────────────────────────────────────────────────
+[x] fmt_bytes_zero                  — 0 → "0 B"
+[x] fmt_bytes_under_1kb             — 1023 → "1023 B"
+[x] fmt_bytes_exactly_1kb           — 1024 → "1.0 KB"
+[x] fmt_bytes_mid_kb                — 512*1024 ends with " KB"
+[x] fmt_bytes_exactly_1mb           — 1_048_576 → "1.00 MB"
+[x] fmt_bytes_exactly_1gb           — 1_073_741_824 → "1.00 GB"
+[x] fmt_bytes_large                 — u64::MAX ends with " GB"
+[x] fmt_uptime_zero                 — 0 → "0s"
+[x] fmt_uptime_seconds_only         — 45 → "45s"
+[x] fmt_uptime_minutes_and_seconds  — 90 → "1m 30s"
+[x] fmt_uptime_exactly_one_hour     — 3600 → "1h 0m 0s"
+[x] fmt_uptime_hours_minutes_seconds — 7323 → "2h 2m 3s"
+
+────────────────────────────────────────────────────────────────────
+Module: src/gui/config_page.rs                           (16 tests)
+────────────────────────────────────────────────────────────────────
+[x] split_addr_ipv4                 — "127.0.0.1:8080" → ("127.0.0.1", "8080")
+[x] split_addr_ipv6_with_brackets   — "[::1]:4000" → ("::1", "4000")
+[x] split_addr_bare_no_port         — "192.168.1.1" → ("192.168.1.1", "")
+[x] cast_idx_roundtrip              — all CastMode variants survive index round-trip
+[x] proto_idx_roundtrip             — both Protocol variants survive index round-trip
+[x] mode_idx_roundtrip              — both EndpointMode variants survive index round-trip
+[x] overflow_idx_roundtrip          — both OverflowPolicy variants survive index round-trip
+[x] from_config_sets_source_fields  — source IP/port/proto/mode correctly decoded
+[x] from_config_sets_dest_fields    — destination IP/port/proto/mode correctly decoded
+[x] from_config_optional_name_empty — None name → empty string in ConfigEdit
+[x] to_config_valid_roundtrip       — from_config → to_config preserves core fields
+[x] to_config_invalid_port_collects_error — "notaport" appears in error list
+[x] to_config_empty_destinations_is_error — empty dests → error mentioning "destination"
+[x] to_config_tcp_broadcast_is_error      — TCP + Broadcast → error collected
+[x] to_config_multiple_errors_all_reported — two bad fields → at least 2 errors
+[x] to_config_rate_limit_round_trip       — enabled bps/burst survive to_config
+
+────────────────────────────────────────────────────────────────────
+SUMMARY
+────────────────────────────────────────────────────────────────────
+Module                    New    Existing   Total
+error.rs                    4        0         4
+stats.rs                    5        3         8
+rate_limiter.rs             3        2         5
+config.rs                  13        8        21
+prefs.rs                    5        0         5
+transport.rs                4        0         4
+relay.rs                    9        0         9
+gui/monitor_page.rs        12        0        12
+gui/config_page.rs         16        0        16
+──────────────────────────────────────────────
+Total                      71       13        84
+
+Also fixed during implementation:
+  stats.rs — run_reporter select! arm uses Ok(()) = shutdown.changed() (same L6
+             pattern as relay.rs); changed to _ = shutdown.changed().

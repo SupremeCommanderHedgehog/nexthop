@@ -1,0 +1,37 @@
+[general]
+log_level = "debug"
+stats_interval_secs = 30
+channel_capacity = 1024
+max_payload_size = 65535
+
+[source]
+name = "source"
+protocol = "udp"
+mode = "server"
+address = "192.168.160.33:999"
+
+[rate_limit]
+bytes_per_second = 1000000
+burst_size = 131072
+
+[[destinations]]
+name = "broadcast"
+protocol = "udp"
+mode = "client"
+address = "192.168.160.255:10000"
+cast_mode = "broadcast"
+
+[[destinations]]
+name = "bc2"
+protocol = "udp"
+mode = "client"
+address = "192.168.160.255:9999"
+cast_mode = "broadcast"
+
+[[destinations]]
+name = "bc3"
+protocol = "udp"
+mode = "client"
+address = "192.168.160.255:9998"
+cast_mode = "broadcast"
+

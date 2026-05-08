@@ -1,0 +1,5 @@
+/target
+/.claude
+/dist
+/node_modules
+/src-tauri/target

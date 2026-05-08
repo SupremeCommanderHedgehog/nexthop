@@ -1,0 +1,133 @@
+# nexthop
+
+A raw TCP/UDP relay with cross-protocol forwarding, multicast/broadcast support,
+per-destination back-pressure, token-bucket rate limiting, and live config reload.
+Ships as a native desktop app (Tauri v2 + React) with an optional headless mode
+for running as a service or in CI pipelines.
+
+---
+
+## Features
+
+- **Cross-protocol forwarding** — receive on TCP and forward to UDP, or vice versa
+- **Unicast, broadcast, and multicast** — IPv4 and IPv6 multicast group membership
+- **Multiple destinations** — fan out one source to many endpoints simultaneously
+- **Per-destination overflow policy** — `drop_newest` (default) or `block` (back-pressure)
+- **Token-bucket rate limiting** — configurable bytes/sec cap with burst allowance
+- **Live config reload** — rate limiter updates take effect on the next packet without a restart
+- **Health endpoint** — optional HTTP `/health` and `/stats` server for monitoring
+- **GUI + headless** — full graphical interface for interactive use; `--no_gui` for server deployments
+- **Dark / light theme**
+
+---
+
+## Requirements
+
+| Tool | Version |
+|------|---------|
+| Rust + Cargo | 1.77+ |
+| Node.js | 18+ |
+| npm | 9+ |
+| Tauri CLI | v2 (installed via npm) |
+
+### Platform prerequisites
+
+- **Windows** — WebView2 runtime (pre-installed on Windows 11; installer available from Microsoft)
+- **macOS** — Xcode Command Line Tools
+- **Linux** — `libwebkit2gtk-4.1`, `libgtk-3`, `libayatana-appindicator3` (or `libappindicator3`)
+
+---
+
+## Building
+
+```sh
+# Install frontend dependencies (first time only)
+npm install
+
+# Development build — hot-reload frontend + live Tauri window
+npm run tauri dev
+
+# Production build (output in src-tauri/target/release/)
+npm run tauri build
+```
+
+---
+
+## Running
+
+### GUI mode (default)
+
+```sh
+nexthop --config nexthop.toml
+```
+
+Opens the desktop window. The **Configuration** tab loads the config file and lets
+you start/stop the relay. The **Monitoring** tab shows live per-endpoint statistics.
+
+### Headless mode
+
+```sh
+nexthop --no_gui --config /etc/relay/production.toml
+
+# JSON-structured logs for Loki / Datadog / etc.
+nexthop --no_gui --log-format json --config production.toml
+```
+
+The relay starts immediately and logs to stdout. Ctrl-C triggers a graceful shutdown.
+
+### CLI reference
+
+| Flag | Short | Default | Description |
+|------|-------|---------|-------------|
+| `--config <FILE>` | `-c` | `nexthop.toml` | Path to the TOML config file |
+| `--log-format <FORMAT>` | — | `text` | `text` or `json` |
+| `--no_gui` | — | *(GUI on)* | Run headless without opening a window |
+| `--help` | `-h` | — | Print help |
+| `--version` | `-V` | — | Print version |
+
+---
+
+## Quick-start config
+
+```toml
+[general]
+log_level           = "info"
+stats_interval_secs = 30
+channel_capacity    = 1024
+max_payload_size    = 65535
+
+[source]
+protocol = "udp"
+mode     = "server"
+address  = "0.0.0.0:10000"
+
+[[destinations]]
+protocol        = "udp"
+mode            = "client"
+address         = "127.0.0.1:20000"
+overflow_policy = "drop_newest"
+```
+
+Save as `nexthop.toml` and run `nexthop`. See [MANUAL.md](MANUAL.md) for the full
+configuration reference, including multicast, rate limiting, and the health endpoint.
+
+---
+
+## Testing
+
+```sh
+# Rust unit tests
+cd src-tauri && cargo test
+
+# TypeScript unit tests
+npm test
+
+# TypeScript tests in watch mode
+npm run test:watch
+```
+
+---
+
+## License
+
+GPL-3.0-or-later — see [LICENSE.md](LICENSE.md) for details.

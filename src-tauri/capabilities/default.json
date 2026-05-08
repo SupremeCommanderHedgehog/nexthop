@@ -1,0 +1,10 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/schema/acl/capabilities/schema.json",
+  "identifier": "default",
+  "description": "Default capabilities for nexthop",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-set-title"
+  ]
+}

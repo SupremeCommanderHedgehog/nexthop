@@ -1,0 +1,582 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026-present nexthop@krypte.me
+//
+// nexthop - TCP / UDP - Unicast / Multicast / Broadcast
+// Architect: nexthop@krypte.me
+// Built by:  Anthropic Claude (Sonnet 4.6)
+
+use crate::error::{RelayError, Result};
+use serde::{Deserialize, Serialize};
+use std::net::SocketAddr;
+
+// ── Top-level configuration ────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct RelayConfig {
+    pub general: GeneralConfig,
+    pub source: EndpointConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit: Option<RateLimitConfig>,
+    pub destinations: Vec<DestConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct GeneralConfig {
+    #[serde(default = "defaults::log_level")]
+    pub log_level: String,
+    #[serde(default = "defaults::stats_interval")]
+    pub stats_interval_secs: u64,
+    #[serde(default = "defaults::channel_capacity")]
+    pub channel_capacity: usize,
+    #[serde(default = "defaults::max_payload")]
+    pub max_payload_size: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health_port: Option<u16>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct RateLimitConfig {
+    pub bytes_per_second: u64,
+    #[serde(default = "defaults::burst")]
+    pub burst_size: u64,
+}
+
+// ── Endpoint (source or destination) ───────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct EndpointConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub protocol: Protocol,
+    pub mode: EndpointMode,
+    pub address: String,
+    #[serde(default)]
+    pub cast_mode: CastMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multicast_interface: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multicast_interface_index: Option<u32>,
+    #[serde(default = "defaults::multicast_ttl")]
+    pub multicast_ttl: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reconnect_delay_ms: Option<u64>,
+}
+
+/// A destination endpoint.  Extends [`EndpointConfig`] with `overflow_policy`,
+/// which only makes sense for outbound queues, not for the source.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct DestConfig {
+    #[serde(flatten)]
+    pub base: EndpointConfig,
+    #[serde(default)]
+    pub overflow_policy: OverflowPolicy,
+}
+
+impl std::ops::Deref for DestConfig {
+    type Target = EndpointConfig;
+    fn deref(&self) -> &EndpointConfig {
+        &self.base
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Protocol {
+    Tcp,
+    Udp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EndpointMode {
+    Server,
+    Client,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CastMode {
+    #[default]
+    Unicast,
+    Broadcast,
+    Multicast,
+}
+
+/// What to do when a destination's queue is full.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OverflowPolicy {
+    #[default]
+    DropNewest,
+    Block,
+}
+
+// ── Helpers ────────────────────────────────────────────────────────
+
+impl EndpointConfig {
+    pub fn socket_addr(&self) -> Result<SocketAddr> {
+        self.address.parse::<SocketAddr>().map_err(Into::into)
+    }
+
+    pub fn display_name(&self) -> String {
+        self.name.clone().unwrap_or_else(|| self.address.clone())
+    }
+
+    pub fn reconnect_delay(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.reconnect_delay_ms.unwrap_or(2000))
+    }
+}
+
+impl RelayConfig {
+    /// Load and validate from a TOML file.
+    pub fn from_file(path: &str) -> Result<Self> {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| RelayError::Config(format!("cannot read '{path}': {e}")))?;
+        let cfg: Self = toml::from_str(&content)?;
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        self.source.socket_addr()?;
+
+        if self.source.protocol == Protocol::Tcp && self.source.cast_mode != CastMode::Unicast {
+            return Err(RelayError::Config(
+                "source: broadcast/multicast requires protocol = \"udp\"".into(),
+            ));
+        }
+
+        if self.source.cast_mode == CastMode::Multicast {
+            if let Some(ref iface) = self.source.multicast_interface {
+                if !iface.is_empty() && iface.parse::<std::net::Ipv4Addr>().is_err() {
+                    return Err(RelayError::Config(format!(
+                        "source: multicast_interface '{iface}' is not a valid IPv4 address \
+                         (use an IP address, not an interface name)"
+                    )));
+                }
+            }
+        }
+
+        if self.destinations.is_empty() {
+            return Err(RelayError::Config(
+                "at least one [[destinations]] entry is required".into(),
+            ));
+        }
+
+        for (i, d) in self.destinations.iter().enumerate() {
+            d.socket_addr().map_err(|e| {
+                RelayError::Config(format!(
+                    "destination[{i}]: invalid address '{}': {e}",
+                    d.address
+                ))
+            })?;
+            if d.protocol == Protocol::Tcp && d.cast_mode != CastMode::Unicast {
+                return Err(RelayError::Config(format!(
+                    "destination[{i}]: broadcast/multicast requires protocol = \"udp\""
+                )));
+            }
+            if d.cast_mode == CastMode::Multicast {
+                if let Some(ref iface) = d.multicast_interface {
+                    if !iface.is_empty() && iface.parse::<std::net::Ipv4Addr>().is_err() {
+                        return Err(RelayError::Config(format!(
+                            "destination[{i}]: multicast_interface '{iface}' is not a valid \
+                             IPv4 address (use an IP address, not an interface name)"
+                        )));
+                    }
+                }
+            }
+        }
+
+        if let Some(ref rl) = self.rate_limit {
+            if rl.bytes_per_second == 0 {
+                return Err(RelayError::Config(
+                    "rate_limit.bytes_per_second must be > 0".into(),
+                ));
+            }
+        }
+
+        if self.general.max_payload_size == 0 {
+            return Err(RelayError::Config(
+                "general.max_payload_size must be > 0".into(),
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+// ── TOML serialisation ─────────────────────────────────────────────
+//
+// We build the TOML string manually instead of using toml::to_string_pretty
+// because toml 0.8 does not reliably handle #[serde(flatten)] inside
+// [[array-of-tables]] during serialisation.
+
+fn toml_str(s: &str) -> String {
+    let escaped = s
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r");
+    format!("\"{escaped}\"")
+}
+
+fn write_endpoint_fields(out: &mut String, e: &EndpointConfig) {
+    if let Some(ref name) = e.name {
+        out.push_str(&format!("name = {}\n", toml_str(name)));
+    }
+    let proto = match e.protocol {
+        Protocol::Tcp => "tcp",
+        Protocol::Udp => "udp",
+    };
+    out.push_str(&format!("protocol = {}\n", toml_str(proto)));
+    let mode = match e.mode {
+        EndpointMode::Server => "server",
+        EndpointMode::Client => "client",
+    };
+    out.push_str(&format!("mode = {}\n", toml_str(mode)));
+    out.push_str(&format!("address = {}\n", toml_str(&e.address)));
+    if e.cast_mode != CastMode::Unicast {
+        let cast = match e.cast_mode {
+            CastMode::Unicast => "unicast",
+            CastMode::Broadcast => "broadcast",
+            CastMode::Multicast => "multicast",
+        };
+        out.push_str(&format!("cast_mode = {}\n", toml_str(cast)));
+    }
+    if let Some(ref iface) = e.multicast_interface {
+        out.push_str(&format!("multicast_interface = {}\n", toml_str(iface)));
+    }
+    if let Some(idx) = e.multicast_interface_index {
+        out.push_str(&format!("multicast_interface_index = {idx}\n"));
+    }
+    if e.multicast_ttl != defaults::multicast_ttl() {
+        out.push_str(&format!("multicast_ttl = {}\n", e.multicast_ttl));
+    }
+    if let Some(ms) = e.reconnect_delay_ms {
+        out.push_str(&format!("reconnect_delay_ms = {ms}\n"));
+    }
+}
+
+/// Serialise a [`RelayConfig`] to a TOML string suitable for writing to disk.
+pub fn to_toml_string(cfg: &RelayConfig) -> String {
+    let mut out = String::new();
+
+    // [general]
+    out.push_str("[general]\n");
+    out.push_str(&format!("log_level = {}\n", toml_str(&cfg.general.log_level)));
+    out.push_str(&format!(
+        "stats_interval_secs = {}\n",
+        cfg.general.stats_interval_secs
+    ));
+    out.push_str(&format!(
+        "channel_capacity = {}\n",
+        cfg.general.channel_capacity
+    ));
+    out.push_str(&format!(
+        "max_payload_size = {}\n",
+        cfg.general.max_payload_size
+    ));
+    if let Some(port) = cfg.general.health_port {
+        out.push_str(&format!("health_port = {port}\n"));
+    }
+    out.push('\n');
+
+    // [source]
+    out.push_str("[source]\n");
+    write_endpoint_fields(&mut out, &cfg.source);
+    out.push('\n');
+
+    // [rate_limit] (optional)
+    if let Some(ref rl) = cfg.rate_limit {
+        out.push_str("[rate_limit]\n");
+        out.push_str(&format!("bytes_per_second = {}\n", rl.bytes_per_second));
+        out.push_str(&format!("burst_size = {}\n", rl.burst_size));
+        out.push('\n');
+    }
+
+    // [[destinations]]
+    for dest in &cfg.destinations {
+        out.push_str("[[destinations]]\n");
+        write_endpoint_fields(&mut out, &dest.base);
+        if dest.overflow_policy != OverflowPolicy::DropNewest {
+            out.push_str("overflow_policy = \"block\"\n");
+        }
+        out.push('\n');
+    }
+
+    out
+}
+
+mod defaults {
+    pub fn log_level() -> String {
+        "info".into()
+    }
+    pub fn stats_interval() -> u64 {
+        30
+    }
+    pub fn channel_capacity() -> usize {
+        1024
+    }
+    pub fn max_payload() -> usize {
+        65535
+    }
+    pub fn multicast_ttl() -> u32 {
+        2
+    }
+    pub fn burst() -> u64 {
+        131_072
+    }
+}
+
+// ── Unit tests ─────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn minimal_cfg(src_proto: &str, dst_proto: &str) -> String {
+        format!(
+            r#"
+[general]
+[source]
+protocol = "{src_proto}"
+mode     = "server"
+address  = "127.0.0.1:10000"
+[[destinations]]
+protocol = "{dst_proto}"
+mode     = "client"
+address  = "127.0.0.1:20000"
+"#
+        )
+    }
+
+    #[test]
+    fn parse_minimal_tcp_tcp() {
+        let cfg: RelayConfig = toml::from_str(&minimal_cfg("tcp", "tcp")).unwrap();
+        cfg.validate().unwrap();
+        assert_eq!(cfg.destinations.len(), 1);
+    }
+
+    #[test]
+    fn parse_cross_protocol() {
+        let cfg: RelayConfig = toml::from_str(&minimal_cfg("tcp", "udp")).unwrap();
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn reject_empty_destinations() {
+        let raw = r#"
+[general]
+[source]
+protocol = "tcp"
+mode     = "server"
+address  = "127.0.0.1:10000"
+"#;
+        let result: std::result::Result<RelayConfig, _> = toml::from_str(raw);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn reject_tcp_multicast_destination() {
+        let raw = r#"
+[general]
+[source]
+protocol = "tcp"
+mode     = "server"
+address  = "127.0.0.1:10000"
+[[destinations]]
+protocol  = "tcp"
+mode      = "client"
+address   = "127.0.0.1:20000"
+cast_mode = "multicast"
+"#;
+        let cfg: RelayConfig = toml::from_str(raw).unwrap();
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn reject_tcp_multicast_source() {
+        let raw = r#"
+[general]
+[source]
+protocol  = "tcp"
+mode      = "server"
+address   = "127.0.0.1:10000"
+cast_mode = "multicast"
+[[destinations]]
+protocol = "udp"
+mode     = "client"
+address  = "127.0.0.1:20000"
+"#;
+        let cfg: RelayConfig = toml::from_str(raw).unwrap();
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn reject_zero_rate() {
+        let raw = r#"
+[general]
+[source]
+protocol = "tcp"
+mode     = "server"
+address  = "127.0.0.1:10000"
+[rate_limit]
+bytes_per_second = 0
+[[destinations]]
+protocol = "tcp"
+mode     = "client"
+address  = "127.0.0.1:20000"
+"#;
+        let cfg: RelayConfig = toml::from_str(raw).unwrap();
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn default_values_applied() {
+        let cfg: RelayConfig = toml::from_str(&minimal_cfg("udp", "udp")).unwrap();
+        assert_eq!(cfg.general.max_payload_size, 65535);
+        assert_eq!(cfg.general.channel_capacity, 1024);
+        assert_eq!(cfg.general.stats_interval_secs, 30);
+    }
+
+    #[test]
+    fn roundtrip_toml() {
+        let cfg: RelayConfig = toml::from_str(&minimal_cfg("tcp", "udp")).unwrap();
+        let toml_str = to_toml_string(&cfg);
+        let cfg2: RelayConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(cfg, cfg2);
+    }
+
+    fn default_endpoint() -> EndpointConfig {
+        EndpointConfig {
+            name: None,
+            protocol: Protocol::Tcp,
+            mode: EndpointMode::Server,
+            address: "127.0.0.1:10000".into(),
+            cast_mode: CastMode::Unicast,
+            multicast_interface: None,
+            multicast_interface_index: None,
+            multicast_ttl: 2,
+            reconnect_delay_ms: None,
+        }
+    }
+
+    #[test]
+    fn display_name_uses_name_field() {
+        let e = EndpointConfig { name: Some("my-source".into()), ..default_endpoint() };
+        assert_eq!(e.display_name(), "my-source");
+    }
+
+    #[test]
+    fn display_name_falls_back_to_address() {
+        let e = EndpointConfig { name: None, ..default_endpoint() };
+        assert_eq!(e.display_name(), e.address);
+    }
+
+    #[test]
+    fn reconnect_delay_default_is_2000ms() {
+        let e = EndpointConfig { reconnect_delay_ms: None, ..default_endpoint() };
+        assert_eq!(e.reconnect_delay(), std::time::Duration::from_millis(2000));
+    }
+
+    #[test]
+    fn reconnect_delay_custom() {
+        let e = EndpointConfig { reconnect_delay_ms: Some(500), ..default_endpoint() };
+        assert_eq!(e.reconnect_delay(), std::time::Duration::from_millis(500));
+    }
+
+    #[test]
+    fn socket_addr_parses_ipv4() {
+        let e = EndpointConfig { address: "127.0.0.1:8080".into(), ..default_endpoint() };
+        assert!(e.socket_addr().is_ok());
+    }
+
+    #[test]
+    fn socket_addr_parses_ipv6() {
+        let e = EndpointConfig { address: "[::1]:8080".into(), ..default_endpoint() };
+        assert!(e.socket_addr().is_ok());
+    }
+
+    #[test]
+    fn socket_addr_rejects_invalid() {
+        let e = EndpointConfig { address: "not-an-address".into(), ..default_endpoint() };
+        assert!(e.socket_addr().is_err());
+    }
+
+    #[test]
+    fn reject_zero_max_payload() {
+        let raw = r#"
+[general]
+max_payload_size = 0
+[source]
+protocol = "tcp"
+mode     = "server"
+address  = "127.0.0.1:10000"
+[[destinations]]
+protocol = "tcp"
+mode     = "client"
+address  = "127.0.0.1:20000"
+"#;
+        let cfg: RelayConfig = toml::from_str(raw).unwrap();
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn reject_invalid_multicast_iface_source() {
+        let raw = r#"
+[general]
+[source]
+protocol = "udp"
+mode = "server"
+address = "224.0.0.1:9000"
+cast_mode = "multicast"
+multicast_interface = "eth0"
+[[destinations]]
+protocol = "udp"
+mode = "client"
+address = "127.0.0.1:20000"
+"#;
+        let cfg: RelayConfig = toml::from_str(raw).unwrap();
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn reject_invalid_multicast_iface_dest() {
+        let raw = r#"
+[general]
+[source]
+protocol = "tcp"
+mode = "server"
+address = "127.0.0.1:10000"
+[[destinations]]
+protocol = "udp"
+mode = "client"
+address = "224.0.0.1:9000"
+cast_mode = "multicast"
+multicast_interface = "eth0"
+"#;
+        let cfg: RelayConfig = toml::from_str(raw).unwrap();
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn from_file_missing_returns_error() {
+        assert!(RelayConfig::from_file("/nonexistent/path/nexthop_test.toml").is_err());
+    }
+
+    #[test]
+    fn toml_string_escapes_quotes_in_name() {
+        let mut cfg: RelayConfig = toml::from_str(&minimal_cfg("tcp", "tcp")).unwrap();
+        cfg.source.name = Some(r#"my "named" source"#.into());
+        let s = to_toml_string(&cfg);
+        let cfg2: RelayConfig = toml::from_str(&s).unwrap();
+        assert_eq!(cfg2.source.name.unwrap(), r#"my "named" source"#);
+    }
+
+    #[test]
+    fn dest_config_deref_reaches_base() {
+        let cfg: RelayConfig = toml::from_str(&minimal_cfg("tcp", "tcp")).unwrap();
+        let dest = &cfg.destinations[0];
+        assert!(dest.socket_addr().is_ok());
+    }
+}

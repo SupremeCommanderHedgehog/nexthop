@@ -1,0 +1,30 @@
+[general]
+log_level = "info"
+stats_interval_secs = 30
+channel_capacity = 1024
+max_payload_size = 65535
+health_port = 998
+
+[source]
+name = "DIS"
+protocol = "udp"
+mode = "server"
+address = "192.168.160.33:3020"
+
+[rate_limit]
+bytes_per_second = 10000000
+burst_size = 131072
+
+[[destinations]]
+name = "SIMDIS"
+protocol = "udp"
+mode = "client"
+address = "127.0.0.1:3001"
+
+[[destinations]]
+name = "NCCT"
+protocol = "udp"
+mode = "server"
+address = "192.168.160.255:3002"
+cast_mode = "broadcast"
+

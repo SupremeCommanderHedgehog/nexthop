@@ -1,0 +1,58 @@
+[general]
+log_level       = "info"          # trace, debug, info, warn, error
+stats_interval_secs = 30          # how often to log statistics
+channel_capacity    = 1024        # internal broadcast-channel depth
+max_payload_size    = 65535       # bytes; datagrams / reads larger than this are dropped
+
+[source]
+name     = "ingest"
+protocol = "udp"                  # tcp | udp
+mode     = "server"               # server = listen/bind, client = connect out
+address  = "0.0.0.0:10000"
+# cast_mode           = "unicast" # unicast | broadcast | multicast  (udp only)
+# multicast_interface = "0.0.0.0" # NIC for multicast joins
+# multicast_ttl       = 2
+
+[rate_limit]
+bytes_per_second = 10485760       # 10 MB/s  (omit section for unlimited)
+burst_size       = 131072         # token-bucket burst
+
+# ── One or more destinations ────────────────────────────────────────
+
+#[[destinations]]
+#name     = "tcp-backend"
+#protocol = "tcp"
+#mode     = "client"               # relay connects TO this address
+#address  = "127.0.0.1:20000"
+#reconnect_delay_ms = 3000
+
+[[destinations]]
+name     = "udp-mirror"
+protocol = "udp"
+mode     = "server"
+address  = "0.0.0.0:20000"
+
+# Multicast example
+# [[destinations]]
+# name                = "multicast-group"
+# protocol            = "udp"
+# mode                = "client"
+# address             = "239.1.1.1:30000"
+# cast_mode           = "multicast"
+# multicast_interface = "0.0.0.0"
+# multicast_ttl       = 4
+
+# Broadcast example
+# [[destinations]]
+# name      = "lan-broadcast"
+# protocol  = "udp"
+# mode      = "client"
+# address   = "255.255.255.255:30001"
+# cast_mode = "broadcast"
+
+# Destination in server mode – relay listens, remote peer connects in
+# [[destinations]]
+# name     = "reverse-tcp"
+# protocol = "tcp"
+# mode     = "server"
+# address  = "0.0.0.0:20002"

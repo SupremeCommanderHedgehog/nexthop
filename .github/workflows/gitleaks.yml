@@ -1,0 +1,51 @@
+name: Secret scan
+
+# Runs gitleaks against every PR and against pushes to the default
+# branch. PR runs scan only the commits added by the PR; default-branch
+# runs scan the full history.
+#
+# Uses the gitleaks binary directly rather than the
+# gitleaks/gitleaks-action wrapper because the wrapper requires a
+# paid license for org accounts.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: secret-scan-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gitleaks:
+    name: gitleaks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Install gitleaks
+        uses: taiki-e/install-action@v2
+        with:
+          tool: gitleaks
+
+      - name: Scan
+        shell: bash
+        env:
+          GITLEAKS_COMMON: --redact --no-banner --verbose --exit-code 1
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            gitleaks detect \
+              --source . \
+              --log-opts="${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}" \
+              $GITLEAKS_COMMON
+          else
+            gitleaks detect --source . $GITLEAKS_COMMON
+          fi

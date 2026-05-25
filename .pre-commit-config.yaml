@@ -1,0 +1,17 @@
+# Pre-commit hooks for this repository.
+#
+# One-time setup (per checkout):
+#   pip install pre-commit
+#   pre-commit install
+#
+# To rescan the whole repo manually:
+#   pre-commit run --all-files
+#
+# To bump pinned hook versions:
+#   pre-commit autoupdate
+
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks

@@ -9,6 +9,12 @@ While `nexthop` is pre-1.0, **minor** version bumps may include breaking changes
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-05-26
+
+Patch release. Backwards-compatible only — no config schema changes,
+no CLI changes, no `/stats` shape changes. Bundles security dependency
+bumps and tooling/documentation introduced after 0.2.0.
+
 ### Added
 - `SECURITY.md` — coordinated-disclosure security policy pointing at GitHub
   private vulnerability reporting.
@@ -22,6 +28,10 @@ While `nexthop` is pre-1.0, **minor** version bumps may include breaking changes
 ### Changed
 - Bumped `vite` from `^5.4.10` to `^6.4.2` (major). Required to pick up the
   path-traversal fix; no v5.x patch was released.
+- `Cargo.lock` refreshed during the version bump — picked up incidental
+  semver-patch updates of several transitive deps
+  (`filetime`, `hashbrown`, `kqueue-sys`, `libredox`, plus new transitive
+  `bs58`). No direct-dependency or feature changes.
 
 ### Fixed
 - Gitleaks CI now downloads the release tarball with a pinned sha256
@@ -69,5 +79,6 @@ and feature-group issues [#1](https://github.com/SupremeCommanderHedgehog/nextho
   (`error`, `stats`, `rate_limiter`, `config`, `prefs`, `transport`, `relay`,
   `gui/monitor_page`, `gui/config_page`).
 
-[Unreleased]: https://github.com/SupremeCommanderHedgehog/nexthop/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/SupremeCommanderHedgehog/nexthop/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/SupremeCommanderHedgehog/nexthop/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/SupremeCommanderHedgehog/nexthop/releases/tag/v0.2.0

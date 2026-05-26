@@ -9,6 +9,13 @@ While `nexthop` is pre-1.0, **minor** version bumps may include breaking changes
 
 ## [Unreleased]
 
+### Fixed
+- `scripts/bump-version.ps1` no longer pulls in semver-patch transitive
+  dependency updates as a side effect of the bump. Switched from
+  `cargo update -p nexthop` (which re-resolves transitives) to
+  `cargo metadata --format-version 1 --quiet`, which rewrites
+  `Cargo.lock` only to match the workspace manifests. (#14)
+
 ## [0.2.1] - 2026-05-26
 
 Patch release. Backwards-compatible only — no config schema changes,

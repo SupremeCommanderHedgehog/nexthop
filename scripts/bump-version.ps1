@@ -83,10 +83,13 @@ Write-Host ""
 Write-Host "Refreshing Cargo.lock"
 Push-Location $RepoRoot
 try {
-    # For workspace members, `cargo update -p <crate>` refreshes the lockfile
-    # entry against the new manifest version (no registry lookup involved).
-    & cargo update -p nexthop 2>&1 | ForEach-Object { "  $_" }
-    if ($LASTEXITCODE -ne 0) { throw "cargo update failed with exit code $LASTEXITCODE" }
+    # `cargo metadata` rewrites Cargo.lock to match the workspace manifests
+    # while respecting existing locked versions for transitive deps. This
+    # keeps the bump surgical (workspace-member version only). Use
+    # `cargo update --workspace` in a separate, explicit commit when you
+    # actually want to refresh transitives.
+    & cargo metadata --format-version 1 --quiet | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "cargo metadata failed with exit code $LASTEXITCODE" }
 } finally {
     Pop-Location
 }

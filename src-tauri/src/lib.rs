@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026-present nexthop@krypte.me
+// Copyright (C) 2026-present Patrick S Connallon
 
 mod app_state;
 mod commands;

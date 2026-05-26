@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026-present nexthop@krypte.me
+// Copyright (C) 2026-present Patrick S Connallon
 //
 // nexthop - TCP / UDP - Unicast / Multicast / Broadcast
-// Architect: nexthop@krypte.me
+// Architect: Patrick S Connallon
 // Built by:  Anthropic Claude (Sonnet 4.6)
 
 //! Relay engine: wires sources to destinations via per-destination mpsc channels.

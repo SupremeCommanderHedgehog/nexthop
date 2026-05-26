@@ -9,12 +9,25 @@ While `nexthop` is pre-1.0, **minor** version bumps may include breaking changes
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-05-26
+
+Patch release. Backwards-compatible — no config schema, CLI, or `/stats`
+shape changes. Developer-tooling fix plus a documentation update.
+
+### Changed
+- Replaced the `nexthop@krypte.me` placeholder with **Patrick S Connallon**
+  in every `// Copyright (C)` and `// Architect:` header across the Rust
+  crate, and in the JSX footer in `src/components/ConfigTab.tsx`. 19 files
+  touched; comment-only, no runtime impact. (#15)
+
 ### Fixed
 - `scripts/bump-version.ps1` no longer pulls in semver-patch transitive
   dependency updates as a side effect of the bump. Switched from
   `cargo update -p nexthop` (which re-resolves transitives) to
   `cargo metadata --format-version 1 --quiet`, which rewrites
-  `Cargo.lock` only to match the workspace manifests. (#14)
+  `Cargo.lock` only to match the workspace manifests. Verified on the
+  0.2.2 cut — `Cargo.lock` diff was exactly the workspace member version
+  line. (#14)
 
 ## [0.2.1] - 2026-05-26
 
@@ -86,6 +99,7 @@ and feature-group issues [#1](https://github.com/SupremeCommanderHedgehog/nextho
   (`error`, `stats`, `rate_limiter`, `config`, `prefs`, `transport`, `relay`,
   `gui/monitor_page`, `gui/config_page`).
 
-[Unreleased]: https://github.com/SupremeCommanderHedgehog/nexthop/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/SupremeCommanderHedgehog/nexthop/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/SupremeCommanderHedgehog/nexthop/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/SupremeCommanderHedgehog/nexthop/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/SupremeCommanderHedgehog/nexthop/releases/tag/v0.2.0

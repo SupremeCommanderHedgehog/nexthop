@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (C) 2026-present nexthop@krypte.me
+// Copyright (C) 2026-present Patrick S Connallon
 
 use crate::app_state::{AppState, RelayState};
 use crate::config::{self, CastMode, DestConfig, EndpointConfig, EndpointMode, GeneralConfig,

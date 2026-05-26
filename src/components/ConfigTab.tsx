@@ -244,7 +244,7 @@ export default function ConfigTab({
             TCP/UDP relay — unicast · multicast · broadcast
           </div>
           <div className="text-xs text-gray-500 dark:text-gray-400">
-            Copyright (C) 2026-present nexthop@krypte.me
+            Copyright (C) 2026-present Patrick S Connallon
           </div>
           <div className="text-xs text-gray-500 dark:text-gray-400">
             GPL-3.0-or-later

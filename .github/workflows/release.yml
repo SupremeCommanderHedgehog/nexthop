@@ -88,3 +88,35 @@ jobs:
           prerelease: false
           includeUpdaterJson: false
           args: ${{ matrix.platform.tauri-args }}
+
+  # SBOMs are generated once (the dep tree is the same across platforms)
+  # and attached to the release alongside the binaries. Runs after `build`
+  # so it doesn't publish SBOMs for a release that failed to ship.
+  sbom:
+    name: SBOM
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Generate SPDX SBOM (anchore/syft)
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: spdx-json
+          output-file: nexthop-${{ github.event.inputs.tag || github.ref_name }}.spdx.json
+          upload-release-assets: true
+          upload-artifact: false
+
+      - name: Generate CycloneDX SBOM (anchore/syft)
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: cyclonedx-json
+          output-file: nexthop-${{ github.event.inputs.tag || github.ref_name }}.cdx.json
+          upload-release-assets: true
+          upload-artifact: false

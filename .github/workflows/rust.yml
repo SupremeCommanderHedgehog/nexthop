@@ -85,9 +85,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: rustsec/audit-check@v2
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          workspaces: ". -> target"
+      # cargo-audit defaults to denying only real vulnerabilities (not
+      # unmaintained / unsound warnings, which cargo-deny handles via
+      # deny.toml). Keeps the two tools complementary: this gate is
+      # security-only, cargo-deny is the broader supply-chain gate.
+      - name: Install cargo-audit
+        run: cargo install --locked cargo-audit
+      - name: cargo audit
+        run: cargo audit
 
   cargo-deny:
     name: cargo deny

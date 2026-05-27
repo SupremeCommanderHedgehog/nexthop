@@ -14,6 +14,10 @@ use tokio::time::{Duration, Instant};
 use tracing::info;
 
 /// Point-in-time snapshot of one endpoint's counters; serializable to JSON.
+///
+/// The `dropped` field is the sum of the four `dropped_*` sub-counters and is
+/// kept for backwards compatibility with consumers of the pre-breakdown /stats
+/// response. New code should prefer the per-reason fields.
 #[derive(Serialize, Deserialize)]
 pub struct StatsSnapshot {
     pub label: String,
@@ -28,6 +32,10 @@ pub struct StatsSnapshot {
     pub total_connections: u64,
     pub errors: u64,
     pub dropped: u64,
+    pub dropped_overflow: u64,
+    pub dropped_oversize: u64,
+    pub dropped_validation: u64,
+    pub dropped_write_error: u64,
 }
 
 /// Shared, lock-free statistics counters for one named endpoint.
@@ -41,7 +49,13 @@ pub struct Stats {
     pub active_connections: AtomicU64,
     pub total_connections: AtomicU64,
     pub errors: AtomicU64,
+    /// Sum of `dropped_*` sub-counters. Kept as a denormalized cache so
+    /// snapshot() reads it directly without a multi-load summation.
     pub dropped_messages: AtomicU64,
+    pub dropped_overflow: AtomicU64,
+    pub dropped_oversize: AtomicU64,
+    pub dropped_validation: AtomicU64,
+    pub dropped_write_error: AtomicU64,
     start_time: Instant,
 }
 
@@ -62,6 +76,10 @@ impl Stats {
             total_connections: AtomicU64::new(0),
             errors: AtomicU64::new(0),
             dropped_messages: AtomicU64::new(0),
+            dropped_overflow: AtomicU64::new(0),
+            dropped_oversize: AtomicU64::new(0),
+            dropped_validation: AtomicU64::new(0),
+            dropped_write_error: AtomicU64::new(0),
             start_time: Instant::now(),
         }
     }
@@ -82,7 +100,31 @@ impl Stats {
         self.errors.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub fn add_dropped(&self, n: u64) {
+    /// Queue-full drops (destination's mpsc channel is full + drop_newest
+    /// policy, or a UDP server's per-peer channel is full).
+    pub fn add_dropped_overflow(&self, n: u64) {
+        self.dropped_overflow.fetch_add(n, Ordering::Relaxed);
+        self.dropped_messages.fetch_add(n, Ordering::Relaxed);
+    }
+
+    /// Datagrams exceeding `general.max_payload_size`.
+    pub fn add_dropped_oversize(&self, n: u64) {
+        self.dropped_oversize.fetch_add(n, Ordering::Relaxed);
+        self.dropped_messages.fetch_add(n, Ordering::Relaxed);
+    }
+
+    /// Validation failures. Reserved for future content/header checks —
+    /// the `dropped_validation` counter is exposed in /stats and /metrics
+    /// today but no code path increments it yet.
+    #[allow(dead_code)]
+    pub fn add_dropped_validation(&self, n: u64) {
+        self.dropped_validation.fetch_add(n, Ordering::Relaxed);
+        self.dropped_messages.fetch_add(n, Ordering::Relaxed);
+    }
+
+    /// Writes to a destination that failed before the packet was delivered.
+    pub fn add_dropped_write_error(&self, n: u64) {
+        self.dropped_write_error.fetch_add(n, Ordering::Relaxed);
         self.dropped_messages.fetch_add(n, Ordering::Relaxed);
     }
 
@@ -117,6 +159,10 @@ impl Stats {
             total_connections: self.total_connections.load(Ordering::Relaxed),
             errors: self.errors.load(Ordering::Relaxed),
             dropped: self.dropped_messages.load(Ordering::Relaxed),
+            dropped_overflow: self.dropped_overflow.load(Ordering::Relaxed),
+            dropped_oversize: self.dropped_oversize.load(Ordering::Relaxed),
+            dropped_validation: self.dropped_validation.load(Ordering::Relaxed),
+            dropped_write_error: self.dropped_write_error.load(Ordering::Relaxed),
         }
     }
 
@@ -219,7 +265,7 @@ pub fn render_prometheus(snapshots: &[StatsSnapshot]) -> String {
     block_counter(
         &mut out,
         "nexthop_dropped_total",
-        "Total packets dropped per endpoint since process start.",
+        "Total packets dropped per endpoint since process start (sum of dropped_* by reason).",
     );
     for s in snapshots {
         row(
@@ -227,6 +273,63 @@ pub fn render_prometheus(snapshots: &[StatsSnapshot]) -> String {
             "nexthop_dropped_total",
             &escape_label(&s.label),
             s.dropped,
+        );
+    }
+
+    // Per-reason breakdown of dropped packets. Sums to nexthop_dropped_total.
+    block_counter(
+        &mut out,
+        "nexthop_dropped_overflow_total",
+        "Packets dropped because the destination queue was full (drop_newest policy).",
+    );
+    for s in snapshots {
+        row(
+            &mut out,
+            "nexthop_dropped_overflow_total",
+            &escape_label(&s.label),
+            s.dropped_overflow,
+        );
+    }
+
+    block_counter(
+        &mut out,
+        "nexthop_dropped_oversize_total",
+        "Packets dropped because they exceeded general.max_payload_size.",
+    );
+    for s in snapshots {
+        row(
+            &mut out,
+            "nexthop_dropped_oversize_total",
+            &escape_label(&s.label),
+            s.dropped_oversize,
+        );
+    }
+
+    block_counter(
+        &mut out,
+        "nexthop_dropped_validation_total",
+        "Packets dropped due to validation failure (reserved).",
+    );
+    for s in snapshots {
+        row(
+            &mut out,
+            "nexthop_dropped_validation_total",
+            &escape_label(&s.label),
+            s.dropped_validation,
+        );
+    }
+
+    block_counter(
+        &mut out,
+        "nexthop_dropped_write_error_total",
+        "Packets dropped because writing to the destination failed.",
+    );
+    for s in snapshots {
+        row(
+            &mut out,
+            "nexthop_dropped_write_error_total",
+            &escape_label(&s.label),
+            s.dropped_write_error,
         );
     }
 
@@ -360,7 +463,7 @@ mod tests {
         s.msg_relayed();
         s.msg_relayed();
         s.add_error();
-        s.add_dropped(3);
+        s.add_dropped_overflow(3);
         s.conn_open();
         let snap = s.snapshot();
         assert_eq!(snap.rx_bytes, 100);
@@ -432,8 +535,8 @@ mod tests {
     #[test]
     fn add_dropped_accumulates() {
         let s = Stats::new("t", "", "");
-        s.add_dropped(5);
-        s.add_dropped(3);
+        s.add_dropped_overflow(5);
+        s.add_dropped_overflow(3);
         assert_eq!(s.dropped_messages.load(Ordering::Relaxed), 8);
     }
 
@@ -455,7 +558,7 @@ mod tests {
     #[test]
     fn snapshot_dropped_matches_add_dropped() {
         let s = Stats::new("t", "", "");
-        s.add_dropped(7);
+        s.add_dropped_overflow(7);
         assert_eq!(s.snapshot().dropped, 7);
     }
 
@@ -486,13 +589,89 @@ mod tests {
         );
     }
 
+    // ── Per-reason dropped breakdown ───────────────────────────────────
+
+    #[test]
+    fn add_dropped_overflow_increments_sub_and_total() {
+        let s = Stats::new("t", "", "");
+        s.add_dropped_overflow(3);
+        assert_eq!(s.dropped_overflow.load(Ordering::Relaxed), 3);
+        assert_eq!(s.dropped_messages.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn add_dropped_oversize_increments_sub_and_total() {
+        let s = Stats::new("t", "", "");
+        s.add_dropped_oversize(2);
+        assert_eq!(s.dropped_oversize.load(Ordering::Relaxed), 2);
+        assert_eq!(s.dropped_messages.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn add_dropped_validation_increments_sub_and_total() {
+        let s = Stats::new("t", "", "");
+        s.add_dropped_validation(4);
+        assert_eq!(s.dropped_validation.load(Ordering::Relaxed), 4);
+        assert_eq!(s.dropped_messages.load(Ordering::Relaxed), 4);
+    }
+
+    #[test]
+    fn add_dropped_write_error_increments_sub_and_total() {
+        let s = Stats::new("t", "", "");
+        s.add_dropped_write_error(5);
+        assert_eq!(s.dropped_write_error.load(Ordering::Relaxed), 5);
+        assert_eq!(s.dropped_messages.load(Ordering::Relaxed), 5);
+    }
+
+    #[test]
+    fn snapshot_dropped_equals_sum_of_breakdown() {
+        let s = Stats::new("t", "", "");
+        s.add_dropped_overflow(1);
+        s.add_dropped_oversize(2);
+        s.add_dropped_validation(3);
+        s.add_dropped_write_error(4);
+        let snap = s.snapshot();
+        assert_eq!(snap.dropped_overflow, 1);
+        assert_eq!(snap.dropped_oversize, 2);
+        assert_eq!(snap.dropped_validation, 3);
+        assert_eq!(snap.dropped_write_error, 4);
+        assert_eq!(snap.dropped, 10, "dropped should equal sum of sub-counters");
+    }
+
+    #[test]
+    fn prometheus_includes_per_reason_dropped_metrics() {
+        let s = Stats::new("dest(b)", "", "");
+        s.add_dropped_overflow(5);
+        s.add_dropped_oversize(1);
+        s.add_dropped_write_error(2);
+        let body = render_prometheus(&[s.snapshot()]);
+
+        for (name, val) in [
+            ("nexthop_dropped_overflow_total", 5),
+            ("nexthop_dropped_oversize_total", 1),
+            ("nexthop_dropped_validation_total", 0),
+            ("nexthop_dropped_write_error_total", 2),
+        ] {
+            let expected = format!("{name}{{endpoint=\"dest(b)\"}} {val}");
+            assert!(
+                body.contains(&expected),
+                "missing {expected}; body=\n{body}"
+            );
+        }
+        // Sum metric still present.
+        assert!(
+            body.contains("nexthop_dropped_total{endpoint=\"dest(b)\"} 8"),
+            "body=\n{body}"
+        );
+    }
+
     // ── render_prometheus / escape_label ───────────────────────────────
 
     fn snap_with(label: &str, rx: u64, tx: u64, dropped: u64, active: u64) -> StatsSnapshot {
         let s = Stats::new(label, "", "");
         s.add_received(rx);
         s.add_sent(tx);
-        s.add_dropped(dropped);
+        s.add_dropped_overflow(dropped);
         for _ in 0..active {
             s.conn_open();
         }

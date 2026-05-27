@@ -50,7 +50,7 @@ async fn send_to_all(channels: &[DestChannel], data: Bytes) {
             OverflowPolicy::DropNewest => {
                 if ch.tx.try_send(data.clone()).is_err() {
                     warn!(dest = %ch.name, "dest queue full, packet dropped");
-                    ch.stats.add_dropped(1);
+                    ch.stats.add_dropped_overflow(1);
                 }
             }
             OverflowPolicy::Block => {
@@ -648,14 +648,14 @@ async fn source_udp(
                     };
                     if n > max_payload {
                         warn!(size = n, max = max_payload, peer = %peer, "payload too large, dropped");
-                        stats_recv.add_error();
+                        stats_recv.add_dropped_oversize(1);
                         continue;
                     }
                     stats_recv.add_received(n as u64);
                     debug!(bytes = n, peer = %peer, "UDP source recv");
                     let data = Bytes::copy_from_slice(&buf[..n]);
                     if recv_tx.try_send(data).is_err() {
-                        stats_recv.add_dropped(1);
+                        stats_recv.add_dropped_overflow(1);
                     }
                 }
                 _ = sd_recv.changed() => return,
@@ -745,6 +745,7 @@ async fn dest_tcp_client(
                     Some(e) => {
                         warn!(dest = %name, error = %e, "dest: TCP write error");
                         stats.add_error();
+                        stats.add_dropped_write_error(1);
                     }
                     None => return Ok(()),
                 }
@@ -839,7 +840,7 @@ async fn dest_tcp_server(
                                 Ok(()) => {}
                                 Err(mpsc::error::TrySendError::Full(_)) => {
                                     // Peer is slow; drop this packet for it.
-                                    stats.add_dropped(1);
+                                    stats.add_dropped_overflow(1);
                                 }
                                 Err(mpsc::error::TrySendError::Closed(_)) => {
                                     // Write task already exited and called conn_close.
@@ -877,6 +878,7 @@ async fn write_to_peer(
         if let Err(e) = writer.write_all(&data).await {
             debug!(dest = %dest_name, peer = %peer, error = %e, "dest-server: write failed");
             stats.add_error();
+            stats.add_dropped_write_error(1);
             break;
         }
         stats.add_sent(data.len() as u64);
@@ -913,6 +915,7 @@ async fn dest_udp_client(
                             Err(e) => {
                                 warn!(dest = %name, error = %e, "dest: UDP send error");
                                 stats.add_error();
+                                stats.add_dropped_write_error(1);
                             }
                         }
                     }

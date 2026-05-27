@@ -34,8 +34,6 @@ ignore = [
     "RUSTSEC-2024-0418", # glib-sys
     "RUSTSEC-2024-0419", # pango
     "RUSTSEC-2024-0420", # gtk
-    "RUSTSEC-2024-0421", # gtk-sys (reserved if surfaced)
-    "RUSTSEC-2024-0422", # atk-sys (reserved if surfaced)
 
     # ── Unmaintained: misc transitive ─────────────────────────────
     # proc-macro-error 1.x is unmaintained; the maintained fork
@@ -69,6 +67,7 @@ allow = [
     "BSL-1.0",
     "CC0-1.0",
     "GPL-3.0",
+    "GPL-3.0-or-later",
     "ISC",
     "MIT",
     "MIT-0",
@@ -79,12 +78,6 @@ allow = [
     "Unlicense",
     "Zlib",
 ]
-
-[[licenses.exceptions]]
-# `ring` ships a custom license that combines ISC, MIT, and OpenSSL
-# clauses. Allow it explicitly.
-allow = ["ISC", "MIT", "OpenSSL"]
-name = "ring"
 
 # ─── Bans ───────────────────────────────────────────────────────────
 [bans]

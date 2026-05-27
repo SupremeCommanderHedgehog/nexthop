@@ -6,6 +6,7 @@ name        = "nexthop"
 version     = "0.2.2"
 edition     = "2021"
 description = "Raw TCP/UDP relay with cross-protocol support"
+license     = "GPL-3.0-or-later"
 
 [lib]
 name       = "nexthop_lib"

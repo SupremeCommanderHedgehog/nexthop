@@ -109,7 +109,9 @@ jobs:
           path: .
           format: spdx-json
           output-file: nexthop-${{ github.event.inputs.tag || github.ref_name }}.spdx.json
-          upload-release-assets: true
+          # anchore's `upload-release-assets` is a no-op outside `release:`
+          # events, so we upload from a follow-up step instead.
+          upload-release-assets: false
           upload-artifact: false
 
       - name: Generate CycloneDX SBOM (anchore/syft)
@@ -118,5 +120,15 @@ jobs:
           path: .
           format: cyclonedx-json
           output-file: nexthop-${{ github.event.inputs.tag || github.ref_name }}.cdx.json
-          upload-release-assets: true
+          upload-release-assets: false
           upload-artifact: false
+
+      - name: Attach SBOMs to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          gh release upload "$TAG" \
+            "nexthop-${TAG}.spdx.json" \
+            "nexthop-${TAG}.cdx.json" \
+            --clobber

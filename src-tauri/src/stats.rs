@@ -137,6 +137,163 @@ impl Stats {
     }
 }
 
+/// Render a set of snapshots as Prometheus text-exposition format
+/// (`text/plain; version=0.0.4`).
+///
+/// Counter naming follows Prometheus conventions: `_total` suffix on
+/// monotonic counters, base units (`_bytes`, `_seconds`) in the metric
+/// name. Endpoint names are passed through `escape_label` so arbitrary
+/// user-provided strings can't break the parser.
+pub fn render_prometheus(snapshots: &[StatsSnapshot]) -> String {
+    fn block_counter(out: &mut String, name: &str, help: &str) {
+        out.push_str(&format!("# HELP {name} {help}\n"));
+        out.push_str(&format!("# TYPE {name} counter\n"));
+    }
+    fn block_gauge(out: &mut String, name: &str, help: &str) {
+        out.push_str(&format!("# HELP {name} {help}\n"));
+        out.push_str(&format!("# TYPE {name} gauge\n"));
+    }
+    fn row(out: &mut String, name: &str, label: &str, value: u64) {
+        out.push_str(&format!("{name}{{endpoint={label}}} {value}\n"));
+    }
+
+    let mut out = String::with_capacity(snapshots.len() * 512);
+
+    // ── Counters ──
+    block_counter(
+        &mut out,
+        "nexthop_rx_bytes_total",
+        "Total bytes received per endpoint since process start.",
+    );
+    for s in snapshots {
+        row(
+            &mut out,
+            "nexthop_rx_bytes_total",
+            &escape_label(&s.label),
+            s.rx_bytes,
+        );
+    }
+
+    block_counter(
+        &mut out,
+        "nexthop_tx_bytes_total",
+        "Total bytes transmitted per endpoint since process start.",
+    );
+    for s in snapshots {
+        row(
+            &mut out,
+            "nexthop_tx_bytes_total",
+            &escape_label(&s.label),
+            s.tx_bytes,
+        );
+    }
+
+    block_counter(
+        &mut out,
+        "nexthop_messages_total",
+        "Total messages relayed per endpoint since process start.",
+    );
+    for s in snapshots {
+        row(
+            &mut out,
+            "nexthop_messages_total",
+            &escape_label(&s.label),
+            s.messages,
+        );
+    }
+
+    block_counter(
+        &mut out,
+        "nexthop_errors_total",
+        "Total endpoint errors since process start.",
+    );
+    for s in snapshots {
+        row(
+            &mut out,
+            "nexthop_errors_total",
+            &escape_label(&s.label),
+            s.errors,
+        );
+    }
+
+    block_counter(
+        &mut out,
+        "nexthop_dropped_total",
+        "Total packets dropped per endpoint since process start.",
+    );
+    for s in snapshots {
+        row(
+            &mut out,
+            "nexthop_dropped_total",
+            &escape_label(&s.label),
+            s.dropped,
+        );
+    }
+
+    block_counter(
+        &mut out,
+        "nexthop_connections_opened_total",
+        "Total connections opened against this endpoint since process start.",
+    );
+    for s in snapshots {
+        row(
+            &mut out,
+            "nexthop_connections_opened_total",
+            &escape_label(&s.label),
+            s.total_connections,
+        );
+    }
+
+    // ── Gauges ──
+    block_gauge(
+        &mut out,
+        "nexthop_active_connections",
+        "Currently open connections to this endpoint.",
+    );
+    for s in snapshots {
+        row(
+            &mut out,
+            "nexthop_active_connections",
+            &escape_label(&s.label),
+            s.active_connections,
+        );
+    }
+
+    block_gauge(
+        &mut out,
+        "nexthop_uptime_seconds",
+        "Seconds since the endpoint's task started.",
+    );
+    for s in snapshots {
+        row(
+            &mut out,
+            "nexthop_uptime_seconds",
+            &escape_label(&s.label),
+            s.uptime_s,
+        );
+    }
+
+    out
+}
+
+/// Quote and escape a label value for Prometheus text-exposition format.
+/// Spec: backslash, double-quote, and newlines must be escaped; everything
+/// else passes through.
+fn escape_label(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// Periodically logs a statistics summary until shutdown.
 pub async fn run_reporter(
     stats: Arc<Stats>,
@@ -326,6 +483,105 @@ mod tests {
         assert!(
             json.contains("\"peer_addr\":\"remote:2000\""),
             "got: {json}"
+        );
+    }
+
+    // ── render_prometheus / escape_label ───────────────────────────────
+
+    fn snap_with(label: &str, rx: u64, tx: u64, dropped: u64, active: u64) -> StatsSnapshot {
+        let s = Stats::new(label, "", "");
+        s.add_received(rx);
+        s.add_sent(tx);
+        s.add_dropped(dropped);
+        for _ in 0..active {
+            s.conn_open();
+        }
+        s.snapshot()
+    }
+
+    #[test]
+    fn prometheus_emits_help_and_type_for_each_metric() {
+        let body = render_prometheus(&[snap_with("source(ingest)", 100, 0, 0, 1)]);
+        for name in [
+            "nexthop_rx_bytes_total",
+            "nexthop_tx_bytes_total",
+            "nexthop_messages_total",
+            "nexthop_errors_total",
+            "nexthop_dropped_total",
+            "nexthop_connections_opened_total",
+            "nexthop_active_connections",
+            "nexthop_uptime_seconds",
+        ] {
+            assert!(
+                body.contains(&format!("# HELP {name} ")),
+                "missing HELP for {name}; body=\n{body}"
+            );
+            assert!(
+                body.contains(&format!("# TYPE {name} ")),
+                "missing TYPE for {name}; body=\n{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn prometheus_counter_values_match_snapshot() {
+        let body = render_prometheus(&[snap_with("dest(tcp-backend)", 0, 4096000, 3, 1)]);
+        assert!(
+            body.contains("nexthop_tx_bytes_total{endpoint=\"dest(tcp-backend)\"} 4096000"),
+            "body=\n{body}"
+        );
+        assert!(
+            body.contains("nexthop_dropped_total{endpoint=\"dest(tcp-backend)\"} 3"),
+            "body=\n{body}"
+        );
+        assert!(
+            body.contains("nexthop_active_connections{endpoint=\"dest(tcp-backend)\"} 1"),
+            "body=\n{body}"
+        );
+    }
+
+    #[test]
+    fn prometheus_emits_one_row_per_endpoint_per_metric() {
+        let body = render_prometheus(&[
+            snap_with("source(a)", 0, 0, 0, 0),
+            snap_with("dest(b)", 0, 0, 0, 0),
+            snap_with("dest(c)", 0, 0, 0, 0),
+        ]);
+        // 3 endpoints, each should appear in nexthop_rx_bytes_total
+        let rx_rows = body
+            .lines()
+            .filter(|l| l.starts_with("nexthop_rx_bytes_total{"))
+            .count();
+        assert_eq!(rx_rows, 3, "body=\n{body}");
+    }
+
+    #[test]
+    fn prometheus_escapes_label_quotes_and_backslashes() {
+        // A user puts weird characters in their endpoint name. The output must
+        // remain parseable Prometheus text.
+        let snap = snap_with(r#"weird"name\with\backslashes"#, 1, 0, 0, 0);
+        let body = render_prometheus(&[snap]);
+        // Quote and backslash get escaped; newlines stay literal in the name
+        // (none here, but the escape is in place for them too).
+        assert!(
+            body.contains(r#"endpoint="weird\"name\\with\\backslashes""#),
+            "body=\n{body}"
+        );
+    }
+
+    #[test]
+    fn prometheus_empty_snapshots_emits_only_help_and_type() {
+        let body = render_prometheus(&[]);
+        // Should still contain HELP/TYPE markers — Prometheus parsers accept
+        // metric families with zero series.
+        assert!(
+            body.contains("# HELP nexthop_rx_bytes_total"),
+            "body=\n{body}"
+        );
+        // But no value rows.
+        assert!(
+            !body.contains("nexthop_rx_bytes_total{"),
+            "should have no rows; body=\n{body}"
         );
     }
 }

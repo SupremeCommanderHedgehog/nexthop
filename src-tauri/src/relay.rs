@@ -80,9 +80,10 @@ pub struct Relay {
 impl Relay {
     pub fn new(config: RelayConfig, config_path: String) -> Self {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let limiter_val = config.rate_limit.as_ref().map(|rl| {
-            Arc::new(RateLimiter::new(rl.bytes_per_second, rl.burst_size))
-        });
+        let limiter_val = config
+            .rate_limit
+            .as_ref()
+            .map(|rl| Arc::new(RateLimiter::new(rl.bytes_per_second, rl.burst_size)));
         let src_local = if config.source.mode == EndpointMode::Server {
             config.source.address.clone()
         } else {
@@ -166,7 +167,8 @@ impl Relay {
         ));
 
         // Create one mpsc channel + one Stats instance per destination.
-        let mut dest_channels: Vec<DestChannel> = Vec::with_capacity(self.config.destinations.len());
+        let mut dest_channels: Vec<DestChannel> =
+            Vec::with_capacity(self.config.destinations.len());
         for (idx, dest) in self.config.destinations.iter().enumerate() {
             let (tx, rx) = mpsc::channel::<Bytes>(cap);
             let name = dest.display_name();
@@ -198,7 +200,11 @@ impl Relay {
         }
 
         if let Some(port) = self.config.general.health_port {
-            task_handles.push(spawn_health_server(port, all_stats, self.shutdown_rx.clone()));
+            task_handles.push(spawn_health_server(
+                port,
+                all_stats,
+                self.shutdown_rx.clone(),
+            ));
         }
 
         let channels: Arc<Vec<DestChannel>> = Arc::new(dest_channels);
@@ -227,14 +233,11 @@ impl Relay {
 
         // Signal all tasks to stop, then wait up to 5 s for them to drain cleanly.
         let _ = self.shutdown_tx.send(true);
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            async {
-                for handle in task_handles {
-                    let _ = handle.await;
-                }
-            },
-        )
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            for handle in task_handles {
+                let _ = handle.await;
+            }
+        })
         .await;
         info!("relay stopped");
         Ok(())
@@ -256,22 +259,21 @@ fn spawn_config_watcher(
     tokio::spawn(async move {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(1);
 
-        let mut watcher = match notify::recommended_watcher(
-            move |res: notify::Result<notify::Event>| {
+        let mut watcher =
+            match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
                 if let Ok(event) = res {
                     use notify::EventKind;
                     if matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
                         let _ = tx.try_send(());
                     }
                 }
-            },
-        ) {
-            Ok(w) => w,
-            Err(e) => {
-                warn!(error = %e, "config watcher init failed, hot-reload disabled");
-                return;
-            }
-        };
+            }) {
+                Ok(w) => w,
+                Err(e) => {
+                    warn!(error = %e, "config watcher init failed, hot-reload disabled");
+                    return;
+                }
+            };
 
         if let Err(e) = watcher.watch(
             std::path::Path::new(&config_path),
@@ -326,7 +328,10 @@ fn spawn_health_server(
                 return;
             }
         };
-        info!(port = port, "health server listening — GET /health  GET /stats");
+        info!(
+            port = port,
+            "health server listening — GET /health  GET /stats"
+        );
         let sem = Arc::new(tokio::sync::Semaphore::new(32));
 
         loop {
@@ -414,15 +419,16 @@ async fn serve_health_request(stream: tokio::net::TcpStream, all_stats: Vec<Arc<
 /// actually differ from the running config, avoiding false positives on
 /// rate-limit-only reloads.
 fn apply_hot_reload(old: &RelayConfig, new: &RelayConfig, limiter: &SharedLimiter) {
-    let new_limiter = new.rate_limit.as_ref().map(|rl| {
-        Arc::new(RateLimiter::new(rl.bytes_per_second, rl.burst_size))
-    });
+    let new_limiter = new
+        .rate_limit
+        .as_ref()
+        .map(|rl| Arc::new(RateLimiter::new(rl.bytes_per_second, rl.burst_size)));
     *limiter.write().unwrap_or_else(|p| p.into_inner()) = new_limiter;
 
     match &new.rate_limit {
         Some(rl) => info!(
             bytes_per_second = rl.bytes_per_second,
-            burst            = rl.burst_size,
+            burst = rl.burst_size,
             "config reloaded: rate limit updated"
         ),
         None => info!("config reloaded: rate limiting disabled"),
@@ -474,7 +480,7 @@ async fn source_tcp_server(
     let addr = cfg.socket_addr()?;
     let listener = tokio::task::spawn_blocking(move || transport::bind_tcp_listener(addr))
         .await
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))??;
+        .map_err(|e| std::io::Error::other(e.to_string()))??;
     info!(address = %addr, "TCP source listening");
 
     loop {
@@ -525,9 +531,9 @@ async fn source_tcp_client(
                 info!(address = %addr, "source: TCP connected");
                 stats.conn_open();
                 let mut sd = shutdown.clone();
-                let res = relay_tcp_reader(
-                    stream, &channels, &stats, &limiter, max_payload, &mut sd,
-                ).await;
+                let res =
+                    relay_tcp_reader(stream, &channels, &stats, &limiter, max_payload, &mut sd)
+                        .await;
                 stats.conn_close();
                 if let Err(e) = res {
                     warn!(address = %addr, error = %e, "source: TCP error");
@@ -595,12 +601,12 @@ async fn source_udp(
         let cfg_for_bind = cfg.clone();
         tokio::task::spawn_blocking(move || transport::bind_udp_recv(addr, &cfg_for_bind))
             .await
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))??
+            .map_err(|e| std::io::Error::other(e.to_string()))??
     } else {
         let cfg_for_bind = cfg.clone();
         let s = tokio::task::spawn_blocking(move || transport::bind_udp_send(addr, &cfg_for_bind))
             .await
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))??;
+            .map_err(|e| std::io::Error::other(e.to_string()))??;
         s.connect(addr).await?;
         s
     };
@@ -673,18 +679,12 @@ async fn run_destination(
     channel_cap: usize,
 ) -> Result<()> {
     match (cfg.protocol, cfg.mode) {
-        (Protocol::Tcp, EndpointMode::Client) => {
-            dest_tcp_client(cfg, rx, stats, shutdown).await
-        }
+        (Protocol::Tcp, EndpointMode::Client) => dest_tcp_client(cfg, rx, stats, shutdown).await,
         (Protocol::Tcp, EndpointMode::Server) => {
             dest_tcp_server(cfg, rx, stats, shutdown, channel_cap).await
         }
-        (Protocol::Udp, EndpointMode::Client) => {
-            dest_udp_client(cfg, rx, stats, shutdown).await
-        }
-        (Protocol::Udp, EndpointMode::Server) => {
-            dest_udp_server(cfg, rx, stats, shutdown).await
-        }
+        (Protocol::Udp, EndpointMode::Client) => dest_udp_client(cfg, rx, stats, shutdown).await,
+        (Protocol::Udp, EndpointMode::Server) => dest_udp_server(cfg, rx, stats, shutdown).await,
     }
 }
 
@@ -758,7 +758,7 @@ async fn dest_tcp_server(
     let name = cfg.display_name();
     let listener = tokio::task::spawn_blocking(move || transport::bind_tcp_listener(addr))
         .await
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))??;
+        .map_err(|e| std::io::Error::other(e.to_string()))??;
     info!(dest = %name, address = %addr, "dest: TCP server listening");
 
     // One bounded channel per peer.  The fan-out loop sends into these channels
@@ -856,18 +856,13 @@ async fn write_to_peer(
     dest_name: String,
 ) {
     let (_, mut writer) = stream.into_split();
-    loop {
-        match rx.recv().await {
-            Some(data) => {
-                if let Err(e) = writer.write_all(&data).await {
-                    debug!(dest = %dest_name, peer = %peer, error = %e, "dest-server: write failed");
-                    stats.add_error();
-                    break;
-                }
-                stats.add_sent(data.len() as u64);
-            }
-            None => break, // sender dropped: either peer replaced or dest shutting down
+    while let Some(data) = rx.recv().await {
+        if let Err(e) = writer.write_all(&data).await {
+            debug!(dest = %dest_name, peer = %peer, error = %e, "dest-server: write failed");
+            stats.add_error();
+            break;
         }
+        stats.add_sent(data.len() as u64);
     }
     stats.conn_close();
 }
@@ -885,7 +880,7 @@ async fn dest_udp_client(
     let cfg_for_bind = cfg.clone();
     let socket = tokio::task::spawn_blocking(move || transport::bind_udp_send(addr, &cfg_for_bind))
         .await
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))??;
+        .map_err(|e| std::io::Error::other(e.to_string()))??;
     info!(dest = %name, address = %addr, cast = ?cfg.cast_mode, "dest: UDP client ready");
 
     loop {
@@ -912,6 +907,9 @@ async fn dest_udp_client(
     }
 }
 
+// The async dest_* fns below sit after this test module for historical
+// reasons; suppress the structural lint rather than churn the file.
+#[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -937,9 +935,17 @@ address  = "127.0.0.1:0"
     #[test]
     fn relay_new_creates_correct_stats_labels() {
         let relay = Relay::new(test_config(), "/tmp/test.toml".to_string());
-        assert!(relay.source_stats.label.starts_with("source("), "label: {}", relay.source_stats.label);
+        assert!(
+            relay.source_stats.label.starts_with("source("),
+            "label: {}",
+            relay.source_stats.label
+        );
         assert_eq!(relay.dest_stats.len(), 1);
-        assert!(relay.dest_stats[0].label.starts_with("dest("), "label: {}", relay.dest_stats[0].label);
+        assert!(
+            relay.dest_stats[0].label.starts_with("dest("),
+            "label: {}",
+            relay.dest_stats[0].label
+        );
     }
 
     #[test]
@@ -987,7 +993,10 @@ address  = "127.0.0.1:0"
     fn apply_hot_reload_installs_rate_limiter() {
         let old = test_config();
         let mut new = test_config();
-        new.rate_limit = Some(RateLimitConfig { bytes_per_second: 500, burst_size: 1000 });
+        new.rate_limit = Some(RateLimitConfig {
+            bytes_per_second: 500,
+            burst_size: 1000,
+        });
         let limiter: SharedLimiter = Arc::new(RwLock::new(None));
         apply_hot_reload(&old, &new, &limiter);
         assert!(limiter.read().unwrap().is_some());
@@ -996,11 +1005,13 @@ address  = "127.0.0.1:0"
     #[test]
     fn apply_hot_reload_removes_rate_limiter() {
         let mut old = test_config();
-        old.rate_limit = Some(RateLimitConfig { bytes_per_second: 1000, burst_size: 5000 });
+        old.rate_limit = Some(RateLimitConfig {
+            bytes_per_second: 1000,
+            burst_size: 5000,
+        });
         let new = test_config(); // no rate_limit
-        let limiter: SharedLimiter = Arc::new(RwLock::new(
-            Some(Arc::new(RateLimiter::new(1000, 5000))),
-        ));
+        let limiter: SharedLimiter =
+            Arc::new(RwLock::new(Some(Arc::new(RateLimiter::new(1000, 5000)))));
         apply_hot_reload(&old, &new, &limiter);
         assert!(limiter.read().unwrap().is_none());
     }
@@ -1020,7 +1031,10 @@ address  = "127.0.0.1:0"
         };
 
         let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
-        client.write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n").await.unwrap();
+        client
+            .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
         let mut response = String::new();
         client.read_to_string(&mut response).await.unwrap();
         server.await.unwrap();
@@ -1046,7 +1060,10 @@ address  = "127.0.0.1:0"
         };
 
         let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
-        client.write_all(b"GET /stats HTTP/1.1\r\nHost: localhost\r\n\r\n").await.unwrap();
+        client
+            .write_all(b"GET /stats HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
         let mut response = String::new();
         client.read_to_string(&mut response).await.unwrap();
         server.await.unwrap();
@@ -1068,7 +1085,10 @@ address  = "127.0.0.1:0"
         });
 
         let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
-        client.write_all(b"GET /unknown HTTP/1.1\r\nHost: localhost\r\n\r\n").await.unwrap();
+        client
+            .write_all(b"GET /unknown HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
         let mut response = String::new();
         client.read_to_string(&mut response).await.unwrap();
         server.await.unwrap();
@@ -1166,8 +1186,18 @@ address  = "0.0.0.0:7000"
             let stats1 = Arc::new(Stats::new("d1", "", ""));
             let stats2 = Arc::new(Stats::new("d2", "", ""));
             let channels = vec![
-                DestChannel { tx: tx1, policy: OverflowPolicy::Block, name: "d1".into(), stats: Arc::clone(&stats1) },
-                DestChannel { tx: tx2, policy: OverflowPolicy::Block, name: "d2".into(), stats: Arc::clone(&stats2) },
+                DestChannel {
+                    tx: tx1,
+                    policy: OverflowPolicy::Block,
+                    name: "d1".into(),
+                    stats: Arc::clone(&stats1),
+                },
+                DestChannel {
+                    tx: tx2,
+                    policy: OverflowPolicy::Block,
+                    name: "d2".into(),
+                    stats: Arc::clone(&stats2),
+                },
             ];
             let payload = Bytes::from("broadcast-payload");
             send_to_all(&channels, payload.clone()).await;
@@ -1203,12 +1233,21 @@ address  = "0.0.0.0:7000"
             serve_health_request(stream, stats).await;
         });
         let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
-        client.write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n").await.unwrap();
+        client
+            .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
         let mut response = String::new();
         client.read_to_string(&mut response).await.unwrap();
         server.await.unwrap();
-        assert!(response.contains("Content-Length:"), "missing header:\n{response}");
-        assert!(response.contains("Content-Type: application/json"), "missing content-type:\n{response}");
+        assert!(
+            response.contains("Content-Length:"),
+            "missing header:\n{response}"
+        );
+        assert!(
+            response.contains("Content-Type: application/json"),
+            "missing content-type:\n{response}"
+        );
     }
 
     #[tokio::test]
@@ -1225,7 +1264,10 @@ address  = "0.0.0.0:7000"
             serve_health_request(stream, stats).await;
         });
         let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
-        client.write_all(b"GET /stats HTTP/1.1\r\nHost: localhost\r\n\r\n").await.unwrap();
+        client
+            .write_all(b"GET /stats HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
         let mut response = String::new();
         client.read_to_string(&mut response).await.unwrap();
         server.await.unwrap();
@@ -1243,7 +1285,10 @@ address  = "0.0.0.0:7000"
             serve_health_request(stream, stats).await;
         });
         let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
-        client.write_all(b"GET /health?v=1 HTTP/1.1\r\nHost: localhost\r\n\r\n").await.unwrap();
+        client
+            .write_all(b"GET /health?v=1 HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
         let mut response = String::new();
         client.read_to_string(&mut response).await.unwrap();
         server.await.unwrap();
@@ -1268,7 +1313,7 @@ async fn dest_udp_server(
     let socket = Arc::new(
         tokio::task::spawn_blocking(move || transport::bind_udp_recv(addr, &cfg_for_bind))
             .await
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))??
+            .map_err(|e| std::io::Error::other(e.to_string()))??,
     );
     info!(dest = %name, address = %addr, "dest: UDP server listening for peer registrations");
 

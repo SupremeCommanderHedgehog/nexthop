@@ -17,7 +17,7 @@ pub struct RateLimiter {
     tokens: AtomicU64,  // f64::to_bits() of current token count (bytes)
     last_ns: AtomicU64, // nanoseconds since `epoch`
     max_tokens: f64,
-    rate: f64,    // bytes per second
+    rate: f64, // bytes per second
     epoch: Instant,
 }
 
@@ -50,7 +50,8 @@ impl RateLimiter {
 
             if refilled >= needed {
                 let new_bits = (refilled - needed).to_bits();
-                if self.tokens
+                if self
+                    .tokens
                     .compare_exchange(old_bits, new_bits, Ordering::Release, Ordering::Relaxed)
                     .is_ok()
                 {
@@ -100,7 +101,11 @@ mod tests {
         // acquire(0) must return immediately even with empty bucket
         let start = Instant::now();
         rl.acquire(0).await;
-        assert!(start.elapsed() < Duration::from_millis(50), "elapsed: {:?}", start.elapsed());
+        assert!(
+            start.elapsed() < Duration::from_millis(50),
+            "elapsed: {:?}",
+            start.elapsed()
+        );
     }
 
     #[tokio::test]
@@ -108,12 +113,16 @@ mod tests {
         // burst = 500; rate = 100_000 B/s
         let rl = RateLimiter::new(100_000, 500);
         rl.acquire(100).await; // tokens → 400
-        // Sleep 100 ms: would refill 10 000 tokens, but capped at 500
+                               // Sleep 100 ms: would refill 10 000 tokens, but capped at 500
         tokio::time::sleep(Duration::from_millis(100)).await;
         // Should succeed immediately (tokens refilled to max 500)
         let start = Instant::now();
         rl.acquire(500).await;
-        assert!(start.elapsed() < Duration::from_millis(50), "elapsed: {:?}", start.elapsed());
+        assert!(
+            start.elapsed() < Duration::from_millis(50),
+            "elapsed: {:?}",
+            start.elapsed()
+        );
     }
 
     #[tokio::test]
@@ -122,7 +131,11 @@ mod tests {
         let rl = RateLimiter::new(100, 10_000);
         let start = Instant::now();
         rl.acquire(9_000).await; // within burst
-        assert!(start.elapsed() < Duration::from_millis(100), "elapsed: {:?}", start.elapsed());
+        assert!(
+            start.elapsed() < Duration::from_millis(100),
+            "elapsed: {:?}",
+            start.elapsed()
+        );
     }
 
     // ── Additional coverage ────────────────────────────────────────────
@@ -135,8 +148,14 @@ mod tests {
         let start = Instant::now();
         rl.acquire(500).await; // must wait ~50 ms
         let elapsed = start.elapsed();
-        assert!(elapsed >= Duration::from_millis(30), "too fast: {elapsed:?}");
-        assert!(elapsed < Duration::from_millis(200), "too slow: {elapsed:?}");
+        assert!(
+            elapsed >= Duration::from_millis(30),
+            "too fast: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(200),
+            "too slow: {elapsed:?}"
+        );
     }
 
     #[tokio::test]
@@ -148,7 +167,10 @@ mod tests {
         rl.acquire(100).await;
         let elapsed = start.elapsed();
         // 200 bytes @ 1000 B/s = 200 ms
-        assert!(elapsed >= Duration::from_millis(150), "too fast: {elapsed:?}");
+        assert!(
+            elapsed >= Duration::from_millis(150),
+            "too fast: {elapsed:?}"
+        );
     }
 
     #[tokio::test]
@@ -156,7 +178,11 @@ mod tests {
         let rl = RateLimiter::new(1, 512); // 1 B/s but 512 burst
         let start = Instant::now();
         rl.acquire(512).await;
-        assert!(start.elapsed() < Duration::from_millis(50), "elapsed: {:?}", start.elapsed());
+        assert!(
+            start.elapsed() < Duration::from_millis(50),
+            "elapsed: {:?}",
+            start.elapsed()
+        );
     }
 
     #[tokio::test]
@@ -165,9 +191,13 @@ mod tests {
         let rl = RateLimiter::new(1_000_000, 100);
         rl.acquire(100).await; // drain completely
         tokio::time::sleep(Duration::from_millis(500)).await; // would refill 500k tokens
-        // Bucket is capped at 100; this must not wait at all.
+                                                              // Bucket is capped at 100; this must not wait at all.
         let start = Instant::now();
         rl.acquire(100).await;
-        assert!(start.elapsed() < Duration::from_millis(50), "elapsed: {:?}", start.elapsed());
+        assert!(
+            start.elapsed() < Duration::from_millis(50),
+            "elapsed: {:?}",
+            start.elapsed()
+        );
     }
 }

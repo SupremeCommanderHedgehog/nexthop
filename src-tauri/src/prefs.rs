@@ -38,7 +38,10 @@ mod tests {
     use super::*;
 
     fn tmp(name: &str) -> String {
-        std::env::temp_dir().join(name).to_string_lossy().into_owned()
+        std::env::temp_dir()
+            .join(name)
+            .to_string_lossy()
+            .into_owned()
     }
 
     #[test]

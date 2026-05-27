@@ -15,7 +15,7 @@ for running as a service or in CI pipelines.
 - **Per-destination overflow policy** — `drop_newest` (default) or `block` (back-pressure)
 - **Token-bucket rate limiting** — configurable bytes/sec cap with burst allowance
 - **Live config reload** — rate limiter updates take effect on the next packet without a restart
-- **Health endpoint** — optional HTTP `/health` and `/stats` server for monitoring
+- **Health endpoint** — optional HTTP `/health`, `/stats`, and Prometheus `/metrics` server for monitoring
 - **GUI + headless** — full graphical interface for interactive use; `--no_gui` for server deployments
 - **Dark / light theme**
 

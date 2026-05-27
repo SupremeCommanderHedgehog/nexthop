@@ -330,7 +330,7 @@ fn spawn_health_server(
         };
         info!(
             port = port,
-            "health server listening — GET /health  GET /stats"
+            "health server listening — GET /health  GET /stats  GET /metrics"
         );
         let sem = Arc::new(tokio::sync::Semaphore::new(32));
 
@@ -391,23 +391,40 @@ async fn serve_health_request(stream: tokio::net::TcpStream, all_stats: Vec<Arc<
     let raw_path = request_line.split_whitespace().nth(1).unwrap_or("/");
     let path = raw_path.split('?').next().unwrap_or("/");
 
-    let (status, body) = match path {
-        "/health" => ("200 OK", r#"{"status":"ok"}"#.to_string()),
+    let (status, content_type, body) = match path {
+        "/health" => (
+            "200 OK",
+            "application/json",
+            r#"{"status":"ok"}"#.to_string(),
+        ),
         "/stats" => {
             let snapshots: Vec<_> = all_stats.iter().map(|s| s.snapshot()).collect();
             match serde_json::to_string(&snapshots) {
-                Ok(json) => ("200 OK", json),
+                Ok(json) => ("200 OK", "application/json", json),
                 Err(_) => (
                     "500 Internal Server Error",
+                    "application/json",
                     r#"{"error":"serialize failed"}"#.to_string(),
                 ),
             }
         }
-        _ => ("404 Not Found", r#"{"error":"not found"}"#.to_string()),
+        "/metrics" => {
+            let snapshots: Vec<_> = all_stats.iter().map(|s| s.snapshot()).collect();
+            (
+                "200 OK",
+                "text/plain; version=0.0.4; charset=utf-8",
+                crate::stats::render_prometheus(&snapshots),
+            )
+        }
+        _ => (
+            "404 Not Found",
+            "application/json",
+            r#"{"error":"not found"}"#.to_string(),
+        ),
     };
 
     let response = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
     let _ = writer.write_all(response.as_bytes()).await;
@@ -1071,6 +1088,58 @@ address  = "127.0.0.1:0"
         assert!(response.contains("200 OK"), "got: {response}");
         assert!(response.contains("rx_bytes"), "got: {response}");
         assert!(response.contains("\"label\":\"src\""), "got: {response}");
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_returns_prometheus_text() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let stat = Arc::new(Stats::new("source(ingest)", "", ""));
+        stat.add_received(4096);
+        stat.add_sent(0);
+        stat.msg_relayed();
+        let stats = vec![Arc::clone(&stat)];
+
+        let server = {
+            let stats = stats.clone();
+            tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                serve_health_request(stream, stats).await;
+            })
+        };
+
+        let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).await.unwrap();
+        server.await.unwrap();
+
+        assert!(response.contains("200 OK"), "got: {response}");
+        assert!(
+            response.contains("Content-Type: text/plain"),
+            "got: {response}"
+        );
+        // HELP + TYPE markers + at least one counter line with the endpoint label.
+        assert!(
+            response.contains("# HELP nexthop_rx_bytes_total"),
+            "got: {response}"
+        );
+        assert!(
+            response.contains("# TYPE nexthop_rx_bytes_total counter"),
+            "got: {response}"
+        );
+        assert!(
+            response.contains("nexthop_rx_bytes_total{endpoint=\"source(ingest)\"} 4096"),
+            "got: {response}"
+        );
+        // Gauges present.
+        assert!(
+            response.contains("# TYPE nexthop_active_connections gauge"),
+            "got: {response}"
+        );
     }
 
     #[tokio::test]

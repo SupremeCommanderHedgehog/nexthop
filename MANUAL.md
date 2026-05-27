@@ -249,6 +249,7 @@ When `general.health_port` is set, a minimal HTTP server starts on `0.0.0.0:<por
 |------|--------|----------|
 | `/health` | `GET` | `200 OK` — `{"status":"ok"}`. Always succeeds while the process is alive. |
 | `/stats` | `GET` | `200 OK` — JSON array of counter snapshots, one object per endpoint (source first, then each destination in config order). |
+| `/metrics` | `GET` | `200 OK` — Prometheus text-exposition format (`text/plain; version=0.0.4`). Same counters as `/stats`, labeled by endpoint. |
 
 ### `/stats` response shape
 
@@ -285,6 +286,32 @@ When `general.health_port` is set, a minimal HTTP server starts on `0.0.0.0:<por
 
 All counter fields are unsigned 64-bit integers. `tx_bytes` on a destination counts
 bytes successfully written; `rx_bytes` on the source counts bytes read from the wire.
+
+### `/metrics` response shape
+
+Standard Prometheus [text-exposition](https://github.com/prometheus/docs/blob/main/content/docs/instrumenting/exposition_formats.md)
+format. Every metric carries a single `endpoint` label whose value is the
+display name used in the logs (e.g. `source(ingest)`, `dest(tcp-backend)`).
+
+| Metric | Type | Notes |
+|--------|------|-------|
+| `nexthop_rx_bytes_total` | counter | Bytes read from the wire by this endpoint. |
+| `nexthop_tx_bytes_total` | counter | Bytes successfully written. |
+| `nexthop_messages_total` | counter | Discrete messages relayed. |
+| `nexthop_errors_total` | counter | Total error events. |
+| `nexthop_dropped_total` | counter | Packets dropped (queue overflow). |
+| `nexthop_connections_opened_total` | counter | Cumulative connections opened. |
+| `nexthop_active_connections` | gauge | Currently open connections. |
+| `nexthop_uptime_seconds` | gauge | Seconds since the endpoint task started. |
+
+Example scrape config:
+
+```yaml
+scrape_configs:
+  - job_name: nexthop
+    static_configs:
+      - targets: ['nexthop-host:9090']
+```
 
 ---
 

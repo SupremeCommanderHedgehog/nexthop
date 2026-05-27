@@ -13,11 +13,36 @@ feature-depth = 1
 version = 2
 yanked = "deny"
 ignore = [
+    # ── Security ───────────────────────────────────────────────────
     # GHSA-wrw7-89jp-8q8g / RUSTSEC-2024-0429 — glib < 0.20.0 unsoundness
     # in VariantStrIter. Linux-only transitive via tauri → wry → gtk-rs
     # 0.18; there is no tauri 2.x release on gtk-rs 0.20 yet. Revisit when
     # tauri/wry upgrade.
     "RUSTSEC-2024-0429",
+
+    # ── Unmaintained: gtk-rs 0.18 family ──────────────────────────
+    # The entire gtk-rs 0.18 family is marked unmaintained in favour of
+    # the 0.20 line. All come in transitively via tauri → wry → gtk-rs
+    # 0.18 on Linux only. Same revisit trigger as RUSTSEC-2024-0429.
+    "RUSTSEC-2024-0411", # atk
+    "RUSTSEC-2024-0412", # gdk
+    "RUSTSEC-2024-0413", # gdkx11
+    "RUSTSEC-2024-0414", # gdkx11-sys
+    "RUSTSEC-2024-0415", # gdk-sys
+    "RUSTSEC-2024-0416", # gio
+    "RUSTSEC-2024-0417", # gio-sys
+    "RUSTSEC-2024-0418", # glib-sys
+    "RUSTSEC-2024-0419", # pango
+    "RUSTSEC-2024-0420", # gtk
+    "RUSTSEC-2024-0421", # gtk-sys (reserved if surfaced)
+    "RUSTSEC-2024-0422", # atk-sys (reserved if surfaced)
+
+    # ── Unmaintained: misc transitive ─────────────────────────────
+    # proc-macro-error 1.x is unmaintained; the maintained fork
+    # `proc-macro-error2` exists but we don't depend on it directly —
+    # it's pulled in by Tauri's macro stack. Will resolve when Tauri
+    # migrates.
+    "RUSTSEC-2024-0370",
 ]
 
 # ─── Licenses ───────────────────────────────────────────────────────

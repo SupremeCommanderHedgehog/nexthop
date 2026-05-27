@@ -68,7 +68,12 @@ export interface StatsSnapshot {
   active_connections: number;
   total_connections: number;
   errors: number;
+  /** Sum of dropped_overflow + dropped_oversize + dropped_validation + dropped_write_error. */
   dropped: number;
+  dropped_overflow: number;
+  dropped_oversize: number;
+  dropped_validation: number;
+  dropped_write_error: number;
 }
 
 export interface StatsPayload {

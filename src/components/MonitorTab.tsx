@@ -87,15 +87,33 @@ function StatsCard({
           }
         />
         {!isSource && (
-          <StatRow
-            label="Dropped"
-            value={String(snap.dropped)}
-            colorClass={
-              snap.dropped > 0
-                ? "text-yellow-600 dark:text-yellow-400"
-                : "text-gray-500"
-            }
-          />
+          <>
+            <StatRow
+              label="Dropped"
+              value={String(snap.dropped)}
+              colorClass={
+                snap.dropped > 0
+                  ? "text-yellow-600 dark:text-yellow-400"
+                  : "text-gray-500"
+              }
+            />
+            {snap.dropped > 0 && (
+              <div className="pl-4 text-xs space-y-0.5">
+                {snap.dropped_overflow > 0 && (
+                  <StatRow label="↳ overflow" value={String(snap.dropped_overflow)} />
+                )}
+                {snap.dropped_oversize > 0 && (
+                  <StatRow label="↳ oversize" value={String(snap.dropped_oversize)} />
+                )}
+                {snap.dropped_validation > 0 && (
+                  <StatRow label="↳ validation" value={String(snap.dropped_validation)} />
+                )}
+                {snap.dropped_write_error > 0 && (
+                  <StatRow label="↳ write error" value={String(snap.dropped_write_error)} />
+                )}
+              </div>
+            )}
+          </>
         )}
         <StatRow label="Uptime" value={fmtUptime(snap.uptime_s)} />
       </div>

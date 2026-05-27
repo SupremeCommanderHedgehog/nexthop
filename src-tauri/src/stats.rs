@@ -138,7 +138,11 @@ impl Stats {
 }
 
 /// Periodically logs a statistics summary until shutdown.
-pub async fn run_reporter(stats: Arc<Stats>, interval: Duration, mut shutdown: watch::Receiver<bool>) {
+pub async fn run_reporter(
+    stats: Arc<Stats>,
+    interval: Duration,
+    mut shutdown: watch::Receiver<bool>,
+) {
     let mut tick = tokio::time::interval(interval);
     tick.tick().await; // consume the immediate first tick
     loop {
@@ -319,6 +323,9 @@ mod tests {
         let s = Stats::new("src", "lo:1000", "remote:2000");
         let json = serde_json::to_string(&s.snapshot()).unwrap();
         assert!(json.contains("\"local_addr\":\"lo:1000\""), "got: {json}");
-        assert!(json.contains("\"peer_addr\":\"remote:2000\""), "got: {json}");
+        assert!(
+            json.contains("\"peer_addr\":\"remote:2000\""),
+            "got: {json}"
+        );
     }
 }

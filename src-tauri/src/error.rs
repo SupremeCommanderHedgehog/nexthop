@@ -46,7 +46,10 @@ mod tests {
     fn display_addr_parse_prefix() {
         let bad: std::result::Result<std::net::SocketAddr, _> = "not_an_addr".parse();
         let e = RelayError::AddrParse(bad.unwrap_err());
-        assert!(e.to_string().starts_with("address parse error:"), "got: {e}");
+        assert!(
+            e.to_string().starts_with("address parse error:"),
+            "got: {e}"
+        );
     }
 
     #[test]

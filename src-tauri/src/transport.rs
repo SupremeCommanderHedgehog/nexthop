@@ -11,9 +11,9 @@
 use crate::config::{CastMode, EndpointConfig};
 use crate::error::Result;
 use socket2::{Domain, Protocol, Socket, Type};
-use tracing::warn;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
+use tracing::warn;
 
 /// Return the socket2 domain matching the address family.
 fn domain_for(addr: &SocketAddr) -> Domain {

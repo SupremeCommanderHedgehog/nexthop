@@ -59,8 +59,8 @@ fn run_headless(cli: Cli) {
         }
     };
 
-    let filter = EnvFilter::try_new(&cfg.general.log_level)
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter =
+        EnvFilter::try_new(&cfg.general.log_level).unwrap_or_else(|_| EnvFilter::new("info"));
 
     match cli.log_format {
         LogFormat::Text => {

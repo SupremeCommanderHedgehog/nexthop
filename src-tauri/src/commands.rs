@@ -2,8 +2,10 @@
 // Copyright (C) 2026-present Patrick S Connallon
 
 use crate::app_state::{AppState, RelayState};
-use crate::config::{self, CastMode, DestConfig, EndpointConfig, EndpointMode, GeneralConfig,
-                    OverflowPolicy, Protocol, RelayConfig};
+use crate::config::{
+    self, CastMode, DestConfig, EndpointConfig, EndpointMode, GeneralConfig, OverflowPolicy,
+    Protocol, RelayConfig,
+};
 use crate::prefs::Prefs;
 use crate::relay::Relay;
 use crate::stats::{Stats, StatsSnapshot};
@@ -56,10 +58,7 @@ fn default_config() -> RelayConfig {
 
 #[tauri::command]
 pub fn get_config(state: State<AppState>) -> Result<RelayConfig, String> {
-    let path = state
-        .config_path
-        .to_str()
-        .ok_or("invalid config path")?;
+    let path = state.config_path.to_str().ok_or("invalid config path")?;
     if !std::path::Path::new(path).exists() {
         return Ok(default_config());
     }
@@ -88,10 +87,7 @@ pub fn start_relay(config: RelayConfig, state: State<AppState>) -> Result<(), St
     let toml = config::to_toml_string(&config);
     std::fs::write(&state.config_path, toml).map_err(|e| e.to_string())?;
 
-    let config_path_str = state
-        .config_path
-        .to_string_lossy()
-        .to_string();
+    let config_path_str = state.config_path.to_string_lossy().to_string();
     let relay = Relay::new(config, config_path_str);
     let source_stats = Arc::clone(&relay.source_stats);
     let dest_stats: Vec<Arc<Stats>> = relay.dest_stats.iter().map(Arc::clone).collect();
@@ -121,7 +117,10 @@ pub fn start_relay(config: RelayConfig, state: State<AppState>) -> Result<(), St
 #[tauri::command]
 pub fn stop_relay(state: State<AppState>) -> Result<(), String> {
     let mut relay_guard = state.relay.lock().map_err(|_| "state lock poisoned")?;
-    if let RelayState::Running { ref shutdown_tx, .. } = *relay_guard {
+    if let RelayState::Running {
+        ref shutdown_tx, ..
+    } = *relay_guard
+    {
         let _ = shutdown_tx.send(true);
     }
     *relay_guard = RelayState::Stopped;
@@ -133,10 +132,7 @@ pub fn stop_relay(state: State<AppState>) -> Result<(), String> {
 
 #[tauri::command]
 pub fn get_relay_status(state: State<AppState>) -> bool {
-    let mut relay_guard = state
-        .relay
-        .lock()
-        .unwrap_or_else(|p| p.into_inner());
+    let mut relay_guard = state.relay.lock().unwrap_or_else(|p| p.into_inner());
     let exited = if let RelayState::Running { ref done, .. } = *relay_guard {
         done.load(Ordering::Acquire)
     } else {
@@ -222,18 +218,12 @@ pub fn get_broadcast_ips() -> Vec<String> {
 
 #[tauri::command]
 pub fn get_prefs(state: State<AppState>) -> Result<Prefs, String> {
-    let path = state
-        .prefs_path
-        .to_str()
-        .ok_or("invalid prefs path")?;
+    let path = state.prefs_path.to_str().ok_or("invalid prefs path")?;
     Prefs::load(path)
 }
 
 #[tauri::command]
 pub fn save_prefs(prefs: Prefs, state: State<AppState>) -> Result<(), String> {
-    let path = state
-        .prefs_path
-        .to_str()
-        .ok_or("invalid prefs path")?;
+    let path = state.prefs_path.to_str().ok_or("invalid prefs path")?;
     prefs.save(path)
 }

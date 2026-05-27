@@ -263,7 +263,10 @@ pub fn to_toml_string(cfg: &RelayConfig) -> String {
 
     // [general]
     out.push_str("[general]\n");
-    out.push_str(&format!("log_level = {}\n", toml_str(&cfg.general.log_level)));
+    out.push_str(&format!(
+        "log_level = {}\n",
+        toml_str(&cfg.general.log_level)
+    ));
     out.push_str(&format!(
         "stats_interval_secs = {}\n",
         cfg.general.stats_interval_secs
@@ -463,43 +466,64 @@ address  = "127.0.0.1:20000"
 
     #[test]
     fn display_name_uses_name_field() {
-        let e = EndpointConfig { name: Some("my-source".into()), ..default_endpoint() };
+        let e = EndpointConfig {
+            name: Some("my-source".into()),
+            ..default_endpoint()
+        };
         assert_eq!(e.display_name(), "my-source");
     }
 
     #[test]
     fn display_name_falls_back_to_address() {
-        let e = EndpointConfig { name: None, ..default_endpoint() };
+        let e = EndpointConfig {
+            name: None,
+            ..default_endpoint()
+        };
         assert_eq!(e.display_name(), e.address);
     }
 
     #[test]
     fn reconnect_delay_default_is_2000ms() {
-        let e = EndpointConfig { reconnect_delay_ms: None, ..default_endpoint() };
+        let e = EndpointConfig {
+            reconnect_delay_ms: None,
+            ..default_endpoint()
+        };
         assert_eq!(e.reconnect_delay(), std::time::Duration::from_millis(2000));
     }
 
     #[test]
     fn reconnect_delay_custom() {
-        let e = EndpointConfig { reconnect_delay_ms: Some(500), ..default_endpoint() };
+        let e = EndpointConfig {
+            reconnect_delay_ms: Some(500),
+            ..default_endpoint()
+        };
         assert_eq!(e.reconnect_delay(), std::time::Duration::from_millis(500));
     }
 
     #[test]
     fn socket_addr_parses_ipv4() {
-        let e = EndpointConfig { address: "127.0.0.1:8080".into(), ..default_endpoint() };
+        let e = EndpointConfig {
+            address: "127.0.0.1:8080".into(),
+            ..default_endpoint()
+        };
         assert!(e.socket_addr().is_ok());
     }
 
     #[test]
     fn socket_addr_parses_ipv6() {
-        let e = EndpointConfig { address: "[::1]:8080".into(), ..default_endpoint() };
+        let e = EndpointConfig {
+            address: "[::1]:8080".into(),
+            ..default_endpoint()
+        };
         assert!(e.socket_addr().is_ok());
     }
 
     #[test]
     fn socket_addr_rejects_invalid() {
-        let e = EndpointConfig { address: "not-an-address".into(), ..default_endpoint() };
+        let e = EndpointConfig {
+            address: "not-an-address".into(),
+            ..default_endpoint()
+        };
         assert!(e.socket_addr().is_err());
     }
 
@@ -684,7 +708,10 @@ address  = "127.0.0.1:20000"
 "#;
         let cfg: RelayConfig = toml::from_str(raw).unwrap();
         let out = to_toml_string(&cfg);
-        assert!(out.contains("bytes_per_second"), "missing bytes_per_second:\n{out}");
+        assert!(
+            out.contains("bytes_per_second"),
+            "missing bytes_per_second:\n{out}"
+        );
         assert!(out.contains("burst_size"), "missing burst_size:\n{out}");
         let cfg2: RelayConfig = toml::from_str(&out).unwrap();
         assert_eq!(cfg, cfg2);
@@ -731,7 +758,10 @@ address  = "127.0.0.1:20000"
         let out = to_toml_string(&cfg);
         let cfg2: RelayConfig = toml::from_str(&out).unwrap();
         assert_eq!(cfg.source.cast_mode, cfg2.source.cast_mode);
-        assert_eq!(cfg.source.multicast_interface, cfg2.source.multicast_interface);
+        assert_eq!(
+            cfg.source.multicast_interface,
+            cfg2.source.multicast_interface
+        );
         assert_eq!(cfg.source.multicast_ttl, cfg2.source.multicast_ttl);
     }
 
@@ -753,7 +783,10 @@ address  = "127.0.0.1:20000"
         let out = to_toml_string(&cfg);
         assert!(out.contains("reconnect_delay_ms"), "missing field:\n{out}");
         let cfg2: RelayConfig = toml::from_str(&out).unwrap();
-        assert_eq!(cfg.source.reconnect_delay_ms, cfg2.source.reconnect_delay_ms);
+        assert_eq!(
+            cfg.source.reconnect_delay_ms,
+            cfg2.source.reconnect_delay_ms
+        );
     }
 
     #[test]
@@ -772,9 +805,15 @@ overflow_policy  = "block"
 "#;
         let cfg: RelayConfig = toml::from_str(raw).unwrap();
         let out = to_toml_string(&cfg);
-        assert!(out.contains("overflow_policy"), "missing overflow_policy:\n{out}");
+        assert!(
+            out.contains("overflow_policy"),
+            "missing overflow_policy:\n{out}"
+        );
         let cfg2: RelayConfig = toml::from_str(&out).unwrap();
-        assert_eq!(cfg.destinations[0].overflow_policy, cfg2.destinations[0].overflow_policy);
+        assert_eq!(
+            cfg.destinations[0].overflow_policy,
+            cfg2.destinations[0].overflow_policy
+        );
     }
 
     #[test]
@@ -865,21 +904,42 @@ reconnect_delay_ms = 750
 
     #[test]
     fn serde_endpoint_mode_lowercase() {
-        assert_eq!(serde_json::to_string(&EndpointMode::Server).unwrap(), r#""server""#);
-        assert_eq!(serde_json::to_string(&EndpointMode::Client).unwrap(), r#""client""#);
+        assert_eq!(
+            serde_json::to_string(&EndpointMode::Server).unwrap(),
+            r#""server""#
+        );
+        assert_eq!(
+            serde_json::to_string(&EndpointMode::Client).unwrap(),
+            r#""client""#
+        );
     }
 
     #[test]
     fn serde_cast_mode_lowercase() {
-        assert_eq!(serde_json::to_string(&CastMode::Unicast).unwrap(), r#""unicast""#);
-        assert_eq!(serde_json::to_string(&CastMode::Broadcast).unwrap(), r#""broadcast""#);
-        assert_eq!(serde_json::to_string(&CastMode::Multicast).unwrap(), r#""multicast""#);
+        assert_eq!(
+            serde_json::to_string(&CastMode::Unicast).unwrap(),
+            r#""unicast""#
+        );
+        assert_eq!(
+            serde_json::to_string(&CastMode::Broadcast).unwrap(),
+            r#""broadcast""#
+        );
+        assert_eq!(
+            serde_json::to_string(&CastMode::Multicast).unwrap(),
+            r#""multicast""#
+        );
     }
 
     #[test]
     fn serde_overflow_policy_snake_case() {
-        assert_eq!(serde_json::to_string(&OverflowPolicy::DropNewest).unwrap(), r#""drop_newest""#);
-        assert_eq!(serde_json::to_string(&OverflowPolicy::Block).unwrap(), r#""block""#);
+        assert_eq!(
+            serde_json::to_string(&OverflowPolicy::DropNewest).unwrap(),
+            r#""drop_newest""#
+        );
+        assert_eq!(
+            serde_json::to_string(&OverflowPolicy::Block).unwrap(),
+            r#""block""#
+        );
     }
 
     #[test]
@@ -925,6 +985,9 @@ address  = "127.0.0.1:20000"
         let cfg: RelayConfig = toml::from_str(raw).unwrap();
         assert_eq!(cfg.source.multicast_ttl, 16);
         let out = to_toml_string(&cfg);
-        assert!(!out.contains("multicast_ttl"), "default TTL should be omitted:\n{out}");
+        assert!(
+            !out.contains("multicast_ttl"),
+            "default TTL should be omitted:\n{out}"
+        );
     }
 }

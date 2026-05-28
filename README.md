@@ -145,6 +145,13 @@ Dependency-Track.
 
 ---
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, commit conventions,
+signing requirements, and the bar for getting changes merged.
+
+---
+
 ## License
 
 GPL-3.0-or-later — see [LICENSE.md](LICENSE.md) for details.

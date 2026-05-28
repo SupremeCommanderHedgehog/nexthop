@@ -339,6 +339,40 @@ would defeat the point of the transform.
 
 Both transforms allocate a fresh `Bytes` for the swapped payload.
 
+### `prepend_timestamp`
+
+Prepend an 8-byte **big-endian u64** timestamp to the payload. The
+result is `[timestamp][original payload]`.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `clock` | string | yes | `"epoch_ns"` or `"monotonic_ns"`. |
+
+```toml
+[[destinations.transforms]]
+type  = "prepend_timestamp"
+clock = "epoch_ns"
+```
+
+- `epoch_ns` — nanoseconds since the Unix epoch
+  (`SystemTime::now()`). Subject to NTP slews and manual clock
+  changes. A payload is dropped (and counted as
+  `dropped_validation`) if the system clock is before the Unix
+  epoch.
+- `monotonic_ns` — nanoseconds since the transform's first packet.
+  Anchored on the first call to that transform and stable across
+  wall-clock adjustments. Two destinations both using
+  `monotonic_ns` will not produce comparable timestamps because each
+  anchors independently; use `epoch_ns` for cross-destination
+  correlation.
+
+The byte order is **big-endian (network byte order)** so the prefix
+is portable across architectures without extra annotation.
+
+The transform always allocates a new `Bytes` of length
+`8 + payload.len()` — it cannot avoid the allocation since the
+payload is growing.
+
 ---
 
 ## Rate limiting

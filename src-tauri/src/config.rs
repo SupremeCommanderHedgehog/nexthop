@@ -114,6 +114,25 @@ pub enum TransformConfig {
     /// Reverse byte order within each 32-bit word. Payloads whose
     /// length is not a multiple of 4 are dropped.
     ByteSwap32,
+    /// Prepend an 8-byte big-endian u64 timestamp to the payload.
+    /// `clock` selects which clock source the timestamp is read from.
+    PrependTimestamp { clock: TimestampClock },
+}
+
+/// Clock source for [`TransformConfig::PrependTimestamp`].
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimestampClock {
+    /// Nanoseconds since the Unix epoch (`SystemTime::now()`). Read
+    /// from the system clock, so subject to NTP slews and manual
+    /// changes. Payloads are dropped if the clock is before the
+    /// Unix epoch.
+    EpochNs,
+    /// Nanoseconds since the transform's first use. Read from
+    /// `Instant::now()` and anchored once on the first packet so
+    /// every later timestamp is a non-decreasing offset from that
+    /// anchor — independent of wall-clock adjustments.
+    MonotonicNs,
 }
 
 impl std::ops::Deref for DestConfig {

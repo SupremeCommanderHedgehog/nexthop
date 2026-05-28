@@ -13,9 +13,9 @@ mod transport;
 
 use app_state::{AppState, RelayState};
 use clap::Parser;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tauri::Manager;
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{layer::SubscriberExt, reload, util::SubscriberInitExt, EnvFilter};
 
 #[derive(clap::ValueEnum, Debug, Clone, Default)]
 pub enum LogFormat {
@@ -59,30 +59,40 @@ fn run_headless(cli: Cli) {
         }
     };
 
-    let filter =
+    let initial_filter =
         EnvFilter::try_new(&cfg.general.log_level).unwrap_or_else(|_| EnvFilter::new("info"));
+    let (filter_layer, reload_handle) = reload::Layer::new(initial_filter);
 
     match cli.log_format {
         LogFormat::Text => {
-            tracing_subscriber::fmt()
-                .with_env_filter(filter)
-                .with_target(false)
+            tracing_subscriber::registry()
+                .with(filter_layer)
+                .with(tracing_subscriber::fmt::layer().with_target(false))
                 .init();
         }
         LogFormat::Json => {
-            tracing_subscriber::fmt()
-                .json()
-                .with_env_filter(filter)
+            tracing_subscriber::registry()
+                .with(filter_layer)
+                .with(tracing_subscriber::fmt::layer().json())
                 .init();
         }
     }
+
+    // Closes over the reload handle so apply_hot_reload can swap the
+    // EnvFilter without re-initializing the subscriber. Returns false on
+    // parse error or if the handle's subscriber has gone away.
+    let log_setter: relay::LogLevelSetter =
+        Arc::new(move |new_level: &str| match EnvFilter::try_new(new_level) {
+            Ok(new_filter) => reload_handle.modify(|f| *f = new_filter).is_ok(),
+            Err(_) => false,
+        });
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("failed to build tokio runtime");
 
-    let relay = relay::Relay::new(cfg, cli.config);
+    let relay = relay::Relay::with_log_setter(cfg, cli.config, log_setter);
     if let Err(e) = rt.block_on(relay.run()) {
         tracing::error!(error = %e, "relay terminated with error");
         std::process::exit(1);

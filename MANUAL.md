@@ -230,14 +230,29 @@ address   = "0.0.0.0:20001"
 ## Hot reload
 
 The relay watches the config file for changes. When a modification is detected the
-following fields take effect immediately **without restarting** any tasks:
+following fields take effect immediately **without restarting** any tasks; everything
+else logs a targeted warning naming what needs a restart.
 
-- `[rate_limit]` — the new limiter (or no limiter if the section is removed) is applied
-  on the very next packet.
+### Live (no restart required)
 
-Changes to `[source]`, `[[destinations]]`, and `[general]` (other than `rate_limit`)
-require a full process restart. The relay logs a warning when it detects such changes in
-a reload.
+| Field | Effect timing |
+|-------|----------------|
+| `[rate_limit]` (whole section, including removal) | Applied on the next packet. |
+| `general.log_level` | Filter is swapped on the underlying `tracing` subscriber; new lines respect the new level immediately. Headless mode only — the GUI uses a fixed subscriber. |
+| `general.stats_interval_secs` | Each reporter re-reads the value on its next tick. A change applied mid-tick takes effect on the following cycle. |
+| `[[destinations]]` `overflow_policy` | Read by the source fan-out per packet, so the next packet observes the new policy. Only applies when the destination at the same index has the same identity (protocol, mode, address, cast_mode). |
+| `[[destinations]]` `reconnect_delay_ms` | Read by the destination task on each reconnect attempt; takes effect on the next reconnect, not mid-sleep. Same identity-match constraint as `overflow_policy`. |
+
+### Restart required
+
+| Field | Why |
+|-------|-----|
+| `[source]` (any field) | Would force-drop in-flight source connections and re-bind the listening socket. |
+| Adding, removing, or relocating `[[destinations]]` | Spawning or stopping destination tasks needs a supervisor (planned). For now, the relay logs a warning and keeps running the previous destination set. |
+| Per-destination changes beyond `overflow_policy` / `reconnect_delay_ms` (e.g. multicast settings, name) | Same supervisor-refactor blocker. |
+| `general.channel_capacity` | Baked into the bounded `mpsc::channel` at construction; would need to recreate every per-destination queue and drain in-flight messages. |
+| `general.max_payload_size` | Used by source read loops to size buffers and validate payloads — a mid-flight change would skew accounting. |
+| `general.health_port` | Bound once at startup; changing the port means listening on a different address, which restart handles cleanly. |
 
 ---
 

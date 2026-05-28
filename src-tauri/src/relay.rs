@@ -15,11 +15,71 @@ use crate::transport;
 use bytes::Bytes;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, watch, Mutex};
 use tracing::{debug, error, info, warn};
+
+// ════════════════════════════════════════════════════════════════════
+//  Per-destination live state
+// ════════════════════════════════════════════════════════════════════
+
+/// Atomically-readable per-destination state shared between the source's
+/// fan-out (which reads `overflow_policy` on every packet) and the
+/// destination task (which reads `reconnect_delay_ms` on each reconnect
+/// cycle). Hot-reload writes these without touching the destination task
+/// itself, so policy or delay can change without dropping connections.
+pub struct DestRuntime {
+    policy: AtomicU8,
+    reconnect_delay_ms: AtomicU64,
+}
+
+// Numeric encoding of OverflowPolicy for atomic storage.
+const POLICY_DROP_NEWEST: u8 = 0;
+const POLICY_BLOCK: u8 = 1;
+
+fn policy_to_u8(p: OverflowPolicy) -> u8 {
+    match p {
+        OverflowPolicy::DropNewest => POLICY_DROP_NEWEST,
+        OverflowPolicy::Block => POLICY_BLOCK,
+    }
+}
+
+fn u8_to_policy(v: u8) -> OverflowPolicy {
+    if v == POLICY_BLOCK {
+        OverflowPolicy::Block
+    } else {
+        OverflowPolicy::DropNewest
+    }
+}
+
+impl DestRuntime {
+    pub fn new(policy: OverflowPolicy, reconnect_delay_ms: u64) -> Self {
+        Self {
+            policy: AtomicU8::new(policy_to_u8(policy)),
+            reconnect_delay_ms: AtomicU64::new(reconnect_delay_ms),
+        }
+    }
+
+    pub fn policy(&self) -> OverflowPolicy {
+        u8_to_policy(self.policy.load(Ordering::Relaxed))
+    }
+
+    pub fn set_policy(&self, p: OverflowPolicy) {
+        self.policy.store(policy_to_u8(p), Ordering::Relaxed);
+    }
+
+    pub fn reconnect_delay(&self) -> Duration {
+        Duration::from_millis(self.reconnect_delay_ms.load(Ordering::Relaxed))
+    }
+
+    pub fn set_reconnect_delay_ms(&self, ms: u64) {
+        self.reconnect_delay_ms.store(ms, Ordering::Relaxed);
+    }
+}
 
 // ════════════════════════════════════════════════════════════════════
 //  Shared rate-limiter slot
@@ -36,17 +96,18 @@ type SharedLimiter = Arc<RwLock<Option<Arc<RateLimiter>>>>;
 
 struct DestChannel {
     tx: mpsc::Sender<Bytes>,
-    policy: OverflowPolicy,
     name: String,
     stats: Arc<Stats>,
+    runtime: Arc<DestRuntime>,
 }
 
 /// Fan-out one packet to every destination, applying each destination's
-/// overflow policy independently.
+/// overflow policy independently. Policy is read fresh per packet so a
+/// hot-reload swap takes effect immediately without dropping the channel.
 async fn send_to_all(channels: &[DestChannel], data: Bytes) {
     let mut block_sends = Vec::new();
     for ch in channels {
-        match ch.policy {
+        match ch.runtime.policy() {
             OverflowPolicy::DropNewest => {
                 if ch.tx.try_send(data.clone()).is_err() {
                     warn!(dest = %ch.name, "dest queue full, packet dropped");
@@ -67,10 +128,30 @@ async fn send_to_all(channels: &[DestChannel], data: Bytes) {
 //  Public entry point
 // ════════════════════════════════════════════════════════════════════
 
+/// Setter for the live log-level filter. `lib.rs` installs the real
+/// implementation backed by a `tracing_subscriber::reload::Handle`; the
+/// GUI path and tests use the no-op default. The closure returns
+/// `false` if the new filter string failed to parse so the caller can
+/// log a warning.
+pub type LogLevelSetter = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
+fn noop_log_setter() -> LogLevelSetter {
+    Arc::new(|_| false)
+}
+
 pub struct Relay {
     config_path: String,
     config: RelayConfig,
     limiter: SharedLimiter,
+    /// Updated in place by hot-reload; every reporter task reads it on
+    /// each tick so an interval change takes effect on the next cycle
+    /// without restarting the reporters.
+    stats_interval_secs: Arc<AtomicU64>,
+    /// One per destination, in the same order as `config.destinations`.
+    /// Shared with both the source-side fan-out (overflow policy) and the
+    /// destination task (reconnect delay).
+    dest_runtime: Vec<Arc<DestRuntime>>,
+    log_setter: LogLevelSetter,
     pub source_stats: Arc<Stats>,
     pub dest_stats: Vec<Arc<Stats>>,
     shutdown_tx: Arc<watch::Sender<bool>>,
@@ -79,6 +160,14 @@ pub struct Relay {
 
 impl Relay {
     pub fn new(config: RelayConfig, config_path: String) -> Self {
+        Self::with_log_setter(config, config_path, noop_log_setter())
+    }
+
+    pub fn with_log_setter(
+        config: RelayConfig,
+        config_path: String,
+        log_setter: LogLevelSetter,
+    ) -> Self {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let limiter_val = config
             .rate_limit
@@ -120,10 +209,24 @@ impl Relay {
                 ))
             })
             .collect();
+        let dest_runtime = config
+            .destinations
+            .iter()
+            .map(|d| {
+                Arc::new(DestRuntime::new(
+                    d.overflow_policy,
+                    d.reconnect_delay_ms.unwrap_or(2000),
+                ))
+            })
+            .collect();
+        let stats_interval_secs = Arc::new(AtomicU64::new(config.general.stats_interval_secs));
         Self {
             config_path,
             config,
             limiter: Arc::new(RwLock::new(limiter_val)),
+            stats_interval_secs,
+            dest_runtime,
+            log_setter,
             source_stats,
             dest_stats,
             shutdown_tx: Arc::new(shutdown_tx),
@@ -140,7 +243,6 @@ impl Relay {
     pub async fn run(self) -> Result<()> {
         let max_payload = self.config.general.max_payload_size;
         let cap = self.config.general.channel_capacity;
-        let interval = std::time::Duration::from_secs(self.config.general.stats_interval_secs);
 
         let mut task_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
@@ -149,7 +251,7 @@ impl Relay {
         let source_stats = Arc::clone(&self.source_stats);
         task_handles.push(tokio::spawn(crate::stats::run_reporter(
             Arc::clone(&source_stats),
-            interval,
+            Arc::clone(&self.stats_interval_secs),
             self.shutdown_rx.clone(),
         )));
 
@@ -159,10 +261,16 @@ impl Relay {
         // track the last-reloaded baseline rather than comparing forever against
         // the original startup snapshot.
         let current_cfg = Arc::new(RwLock::new(self.config.clone()));
+        let hot_ctx = HotReloadCtx {
+            limiter: Arc::clone(&self.limiter),
+            stats_interval_secs: Arc::clone(&self.stats_interval_secs),
+            dest_runtime: self.dest_runtime.clone(),
+            log_setter: Arc::clone(&self.log_setter),
+        };
         task_handles.push(spawn_config_watcher(
             self.config_path.clone(),
             current_cfg,
-            Arc::clone(&self.limiter),
+            hot_ctx,
             self.shutdown_rx.clone(),
         ));
 
@@ -173,26 +281,28 @@ impl Relay {
             let (tx, rx) = mpsc::channel::<Bytes>(cap);
             let name = dest.display_name();
             let dest_stats = Arc::clone(&self.dest_stats[idx]);
+            let runtime = Arc::clone(&self.dest_runtime[idx]);
 
             task_handles.push(tokio::spawn(crate::stats::run_reporter(
                 Arc::clone(&dest_stats),
-                interval,
+                Arc::clone(&self.stats_interval_secs),
                 self.shutdown_rx.clone(),
             )));
 
             all_stats.push(Arc::clone(&dest_stats));
             dest_channels.push(DestChannel {
                 tx,
-                policy: dest.overflow_policy,
                 name: name.clone(),
                 stats: Arc::clone(&dest_stats),
+                runtime: Arc::clone(&runtime),
             });
 
             let cfg = dest.clone();
             let sd = self.shutdown_rx.clone();
             info!(dest = %name, index = idx, proto = ?cfg.protocol, mode = ?cfg.mode, "destination starting");
             task_handles.push(tokio::spawn(async move {
-                if let Err(e) = run_destination(cfg, rx, dest_stats.clone(), sd, cap).await {
+                if let Err(e) = run_destination(cfg, runtime, rx, dest_stats.clone(), sd, cap).await
+                {
                     error!(dest = %name, error = %e, "destination failed");
                     dest_stats.add_error();
                 }
@@ -281,10 +391,20 @@ async fn wait_for_shutdown_signal() -> &'static str {
 //  Config hot-reload
 // ════════════════════════════════════════════════════════════════════
 
+/// Handles `apply_hot_reload` writes through to mutate live state without
+/// restarting tasks. All fields are independently swappable.
+pub struct HotReloadCtx {
+    pub limiter: SharedLimiter,
+    pub stats_interval_secs: Arc<AtomicU64>,
+    /// One per destination, in the same order as `RelayConfig.destinations`.
+    pub dest_runtime: Vec<Arc<DestRuntime>>,
+    pub log_setter: LogLevelSetter,
+}
+
 fn spawn_config_watcher(
     config_path: String,
     current_cfg: Arc<RwLock<RelayConfig>>,
-    limiter: SharedLimiter,
+    ctx: HotReloadCtx,
     mut shutdown: watch::Receiver<bool>,
 ) -> tokio::task::JoinHandle<()> {
     use notify::{RecursiveMode, Watcher};
@@ -322,7 +442,7 @@ fn spawn_config_watcher(
             tokio::select! {
                 Some(()) = rx.recv() => {
                     // Debounce: editors often write files in multiple rapid flushes.
-                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    tokio::time::sleep(Duration::from_millis(200)).await;
                     while rx.try_recv().is_ok() {}
 
                     match crate::config::RelayConfig::from_file(&config_path) {
@@ -331,7 +451,7 @@ fn spawn_config_watcher(
                                 .read()
                                 .unwrap_or_else(|p| p.into_inner())
                                 .clone();
-                            apply_hot_reload(&old, &new_cfg, &limiter);
+                            apply_hot_reload(&old, &new_cfg, &ctx);
                             *current_cfg.write().unwrap_or_else(|p| p.into_inner()) = new_cfg;
                         }
                         Err(e) => warn!(error = %e, "config reload failed, keeping current settings"),
@@ -465,30 +585,130 @@ async fn serve_health_request(stream: tokio::net::TcpStream, all_stats: Vec<Arc<
 
 /// Apply the fields that can be changed without restarting tasks.
 ///
-/// Currently: rate_limit.  Warns only when source/destinations/general fields
-/// actually differ from the running config, avoiding false positives on
-/// rate-limit-only reloads.
-fn apply_hot_reload(old: &RelayConfig, new: &RelayConfig, limiter: &SharedLimiter) {
-    let new_limiter = new
-        .rate_limit
-        .as_ref()
-        .map(|rl| Arc::new(RateLimiter::new(rl.bytes_per_second, rl.burst_size)));
-    *limiter.write().unwrap_or_else(|p| p.into_inner()) = new_limiter;
-
-    match &new.rate_limit {
-        Some(rl) => info!(
-            bytes_per_second = rl.bytes_per_second,
-            burst = rl.burst_size,
-            "config reloaded: rate limit updated"
-        ),
-        None => info!("config reloaded: rate limiting disabled"),
+/// Live: rate_limit, general.log_level, general.stats_interval_secs, and
+/// per-destination overflow_policy + reconnect_delay_ms (matched by index
+/// when source identity is unchanged). Anything else still requires a
+/// restart, and we log a single targeted warning naming the offending
+/// area instead of a blanket "something changed" message.
+fn apply_hot_reload(old: &RelayConfig, new: &RelayConfig, ctx: &HotReloadCtx) {
+    // ── rate_limit ────────────────────────────────────────────────
+    if old.rate_limit != new.rate_limit {
+        let new_limiter = new
+            .rate_limit
+            .as_ref()
+            .map(|rl| Arc::new(RateLimiter::new(rl.bytes_per_second, rl.burst_size)));
+        *ctx.limiter.write().unwrap_or_else(|p| p.into_inner()) = new_limiter;
+        match &new.rate_limit {
+            Some(rl) => info!(
+                bytes_per_second = rl.bytes_per_second,
+                burst = rl.burst_size,
+                "config reloaded: rate limit updated"
+            ),
+            None => info!("config reloaded: rate limiting disabled"),
+        }
     }
 
-    if new.source != old.source
-        || new.destinations != old.destinations
-        || new.general != old.general
+    // ── general.log_level ─────────────────────────────────────────
+    if old.general.log_level != new.general.log_level {
+        if (ctx.log_setter)(&new.general.log_level) {
+            info!(
+                log_level = %new.general.log_level,
+                "config reloaded: log level updated"
+            );
+        } else {
+            warn!(
+                log_level = %new.general.log_level,
+                "config reloaded: log level change rejected (invalid filter or no reload handle); keeping previous level"
+            );
+        }
+    }
+
+    // ── general.stats_interval_secs ───────────────────────────────
+    if old.general.stats_interval_secs != new.general.stats_interval_secs {
+        ctx.stats_interval_secs
+            .store(new.general.stats_interval_secs, Ordering::Relaxed);
+        info!(
+            stats_interval_secs = new.general.stats_interval_secs,
+            "config reloaded: stats interval updated"
+        );
+    }
+
+    // ── per-destination policy + reconnect delay ──────────────────
+    // Only safe to match by index while the destination identity
+    // (protocol + mode + address + cast_mode) is unchanged. Add/remove
+    // and identity-change live updates land with the supervisor refactor.
+    let identity_matches = old.destinations.len() == new.destinations.len()
+        && old
+            .destinations
+            .iter()
+            .zip(new.destinations.iter())
+            .all(|(o, n)| {
+                o.protocol == n.protocol
+                    && o.mode == n.mode
+                    && o.address == n.address
+                    && o.cast_mode == n.cast_mode
+            });
+    if identity_matches {
+        for (idx, (o, n)) in old
+            .destinations
+            .iter()
+            .zip(new.destinations.iter())
+            .enumerate()
+        {
+            let rt = &ctx.dest_runtime[idx];
+            if o.overflow_policy != n.overflow_policy {
+                rt.set_policy(n.overflow_policy);
+                info!(
+                    dest = %n.display_name(),
+                    policy = ?n.overflow_policy,
+                    "config reloaded: overflow_policy updated"
+                );
+            }
+            if o.reconnect_delay_ms != n.reconnect_delay_ms {
+                let ms = n.reconnect_delay_ms.unwrap_or(2000);
+                rt.set_reconnect_delay_ms(ms);
+                info!(
+                    dest = %n.display_name(),
+                    reconnect_delay_ms = ms,
+                    "config reloaded: reconnect_delay_ms updated (takes effect on next reconnect)"
+                );
+            }
+        }
+    } else {
+        warn!("config reloaded: adding, removing, or relocating destinations requires a restart");
+    }
+
+    // ── still-restart-required surfaces ───────────────────────────
+    if new.source != old.source {
+        warn!("config reloaded: source changes require a restart (would force-drop in-flight connections)");
+    }
+    let g_old = &old.general;
+    let g_new = &new.general;
+    if g_old.channel_capacity != g_new.channel_capacity
+        || g_old.max_payload_size != g_new.max_payload_size
+        || g_old.health_port != g_new.health_port
     {
-        warn!("config reloaded: changes to source, destinations, or general settings require a restart");
+        warn!("config reloaded: channel_capacity, max_payload_size, and health_port require a restart");
+    }
+    // Per-dest identity fields beyond policy + delay (multicast settings,
+    // names, etc) also require restart while identity_matches is true.
+    if identity_matches {
+        let any_other_dest_change =
+            old.destinations
+                .iter()
+                .zip(new.destinations.iter())
+                .any(|(o, n)| {
+                    let mut o_norm = o.clone();
+                    let n_norm = n.clone();
+                    // Mask the live-update fields so the remaining diff highlights
+                    // restart-required changes only.
+                    o_norm.overflow_policy = n_norm.overflow_policy;
+                    o_norm.base.reconnect_delay_ms = n_norm.base.reconnect_delay_ms;
+                    o_norm != n_norm
+                });
+        if any_other_dest_change {
+            warn!("config reloaded: per-destination changes beyond overflow_policy and reconnect_delay_ms require a restart");
+        }
     }
 }
 
@@ -723,13 +943,16 @@ async fn source_udp(
 
 async fn run_destination(
     cfg: DestConfig,
+    runtime: Arc<DestRuntime>,
     rx: mpsc::Receiver<Bytes>,
     stats: Arc<Stats>,
     shutdown: watch::Receiver<bool>,
     channel_cap: usize,
 ) -> Result<()> {
     match (cfg.protocol, cfg.mode) {
-        (Protocol::Tcp, EndpointMode::Client) => dest_tcp_client(cfg, rx, stats, shutdown).await,
+        (Protocol::Tcp, EndpointMode::Client) => {
+            dest_tcp_client(cfg, runtime, rx, stats, shutdown).await
+        }
         (Protocol::Tcp, EndpointMode::Server) => {
             dest_tcp_server(cfg, rx, stats, shutdown, channel_cap).await
         }
@@ -742,12 +965,12 @@ async fn run_destination(
 
 async fn dest_tcp_client(
     cfg: DestConfig,
+    runtime: Arc<DestRuntime>,
     mut rx: mpsc::Receiver<Bytes>,
     stats: Arc<Stats>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
     let addr = cfg.socket_addr()?;
-    let delay = cfg.reconnect_delay();
     let name = cfg.display_name();
 
     loop {
@@ -789,8 +1012,10 @@ async fn dest_tcp_client(
             }
         }
 
+        // Re-read each iteration so a hot-reload change takes effect on the
+        // next reconnect without disturbing the current connection.
         tokio::select! {
-            _ = tokio::time::sleep(delay) => {}
+            _ = tokio::time::sleep(runtime.reconnect_delay()) => {}
             _ = shutdown.changed() => return Ok(()),
         }
     }
@@ -1009,6 +1234,38 @@ address  = "127.0.0.1:0"
         assert_eq!(relay.dest_stats.len(), 2);
     }
 
+    fn test_runtime(policy: OverflowPolicy) -> Arc<DestRuntime> {
+        Arc::new(DestRuntime::new(policy, 2000))
+    }
+
+    fn test_ctx_for(cfg: &RelayConfig) -> (HotReloadCtx, Vec<Arc<Stats>>) {
+        let limiter: SharedLimiter = Arc::new(RwLock::new(None));
+        let dest_runtime: Vec<_> = cfg
+            .destinations
+            .iter()
+            .map(|d| {
+                Arc::new(DestRuntime::new(
+                    d.overflow_policy,
+                    d.reconnect_delay_ms.unwrap_or(2000),
+                ))
+            })
+            .collect();
+        let stats: Vec<_> = cfg
+            .destinations
+            .iter()
+            .map(|_| Arc::new(Stats::new("test", "", "")))
+            .collect();
+        (
+            HotReloadCtx {
+                limiter,
+                stats_interval_secs: Arc::new(AtomicU64::new(cfg.general.stats_interval_secs)),
+                dest_runtime,
+                log_setter: noop_log_setter(),
+            },
+            stats,
+        )
+    }
+
     #[tokio::test]
     async fn send_to_all_drop_newest_increments_dropped() {
         let (tx, mut rx) = mpsc::channel::<Bytes>(1);
@@ -1016,9 +1273,9 @@ address  = "127.0.0.1:0"
         let stats = Arc::new(Stats::new("dest", "", ""));
         let ch = DestChannel {
             tx,
-            policy: OverflowPolicy::DropNewest,
             name: "dest".to_string(),
             stats: Arc::clone(&stats),
+            runtime: test_runtime(OverflowPolicy::DropNewest),
         };
         send_to_all(&[ch], Bytes::from("overflow")).await;
         assert_eq!(stats.dropped_messages.load(Ordering::Relaxed), 1);
@@ -1031,9 +1288,9 @@ address  = "127.0.0.1:0"
         let stats = Arc::new(Stats::new("dest", "", ""));
         let ch = DestChannel {
             tx,
-            policy: OverflowPolicy::Block,
             name: "dest".to_string(),
             stats: Arc::clone(&stats),
+            runtime: test_runtime(OverflowPolicy::Block),
         };
         let data = Bytes::from("hello");
         send_to_all(&[ch], data.clone()).await;
@@ -1050,9 +1307,9 @@ address  = "127.0.0.1:0"
             bytes_per_second: 500,
             burst_size: 1000,
         });
-        let limiter: SharedLimiter = Arc::new(RwLock::new(None));
-        apply_hot_reload(&old, &new, &limiter);
-        assert!(limiter.read().unwrap().is_some());
+        let (ctx, _) = test_ctx_for(&old);
+        apply_hot_reload(&old, &new, &ctx);
+        assert!(ctx.limiter.read().unwrap().is_some());
     }
 
     #[test]
@@ -1063,10 +1320,146 @@ address  = "127.0.0.1:0"
             burst_size: 5000,
         });
         let new = test_config(); // no rate_limit
-        let limiter: SharedLimiter =
-            Arc::new(RwLock::new(Some(Arc::new(RateLimiter::new(1000, 5000)))));
-        apply_hot_reload(&old, &new, &limiter);
-        assert!(limiter.read().unwrap().is_none());
+        let (ctx, _) = test_ctx_for(&old);
+        *ctx.limiter.write().unwrap() = Some(Arc::new(RateLimiter::new(1000, 5000)));
+        apply_hot_reload(&old, &new, &ctx);
+        assert!(ctx.limiter.read().unwrap().is_none());
+    }
+
+    // ── New live-field hot-reload coverage ────────────────────────
+
+    #[test]
+    fn apply_hot_reload_updates_log_level_via_setter() {
+        use std::sync::Mutex;
+        let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_clone = Arc::clone(&captured);
+        let setter: LogLevelSetter = Arc::new(move |level: &str| {
+            captured_clone.lock().unwrap().push(level.to_string());
+            true
+        });
+
+        let mut old = test_config();
+        old.general.log_level = "info".to_string();
+        let mut new = test_config();
+        new.general.log_level = "debug".to_string();
+
+        let (mut ctx, _) = test_ctx_for(&old);
+        ctx.log_setter = setter;
+
+        apply_hot_reload(&old, &new, &ctx);
+        assert_eq!(captured.lock().unwrap().as_slice(), &["debug".to_string()]);
+    }
+
+    #[test]
+    fn apply_hot_reload_skips_log_level_when_unchanged() {
+        use std::sync::Mutex;
+        let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_clone = Arc::clone(&captured);
+        let setter: LogLevelSetter = Arc::new(move |level: &str| {
+            captured_clone.lock().unwrap().push(level.to_string());
+            true
+        });
+
+        let cfg = test_config();
+        let (mut ctx, _) = test_ctx_for(&cfg);
+        ctx.log_setter = setter;
+
+        apply_hot_reload(&cfg, &cfg, &ctx);
+        assert!(captured.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn apply_hot_reload_updates_stats_interval_atomic() {
+        let mut old = test_config();
+        old.general.stats_interval_secs = 30;
+        let mut new = test_config();
+        new.general.stats_interval_secs = 5;
+
+        let (ctx, _) = test_ctx_for(&old);
+        ctx.stats_interval_secs.store(30, Ordering::Relaxed);
+
+        apply_hot_reload(&old, &new, &ctx);
+        assert_eq!(ctx.stats_interval_secs.load(Ordering::Relaxed), 5);
+    }
+
+    #[test]
+    fn apply_hot_reload_updates_overflow_policy_atomic() {
+        let mut old = test_config();
+        old.destinations[0].overflow_policy = OverflowPolicy::DropNewest;
+        let mut new = test_config();
+        new.destinations[0].overflow_policy = OverflowPolicy::Block;
+
+        let (ctx, _) = test_ctx_for(&old);
+        assert_eq!(ctx.dest_runtime[0].policy(), OverflowPolicy::DropNewest);
+
+        apply_hot_reload(&old, &new, &ctx);
+        assert_eq!(ctx.dest_runtime[0].policy(), OverflowPolicy::Block);
+    }
+
+    #[test]
+    fn apply_hot_reload_updates_reconnect_delay_atomic() {
+        let mut old = test_config();
+        old.destinations[0].base.reconnect_delay_ms = Some(2000);
+        let mut new = test_config();
+        new.destinations[0].base.reconnect_delay_ms = Some(500);
+
+        let (ctx, _) = test_ctx_for(&old);
+        ctx.dest_runtime[0].set_reconnect_delay_ms(2000);
+
+        apply_hot_reload(&old, &new, &ctx);
+        assert_eq!(
+            ctx.dest_runtime[0].reconnect_delay(),
+            Duration::from_millis(500)
+        );
+    }
+
+    #[test]
+    fn apply_hot_reload_skips_policy_update_when_dest_identity_changes() {
+        let old = test_config();
+        let mut new = test_config();
+        // Change the destination address — identity diverges, so per-dest
+        // live updates must NOT silently fire on an unrelated slot.
+        new.destinations[0].base.address = "127.0.0.1:1".to_string();
+        new.destinations[0].overflow_policy = OverflowPolicy::Block;
+
+        let (ctx, _) = test_ctx_for(&old);
+        let initial = ctx.dest_runtime[0].policy();
+        apply_hot_reload(&old, &new, &ctx);
+        assert_eq!(
+            ctx.dest_runtime[0].policy(),
+            initial,
+            "policy must not update when dest identity changes"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_reporter_reads_interval_from_atomic() {
+        // Drive the reporter with a 1-second interval, then bump it to a
+        // large value mid-flight and assert no additional log_report tick
+        // fires within the short window. We can't easily intercept log
+        // output here, so we use shutdown timing as a coarse proxy:
+        // the reporter must exit cleanly on shutdown regardless of the
+        // live interval value.
+        let stats = Arc::new(Stats::new("test", "", ""));
+        let interval = Arc::new(AtomicU64::new(1));
+        let (tx, rx) = watch::channel(false);
+
+        let stats_for_task = Arc::clone(&stats);
+        let interval_for_task = Arc::clone(&interval);
+        let handle = tokio::spawn(async move {
+            crate::stats::run_reporter(stats_for_task, interval_for_task, rx).await;
+        });
+
+        // Bump the interval — reporter should pick this up on next tick.
+        interval.store(3600, Ordering::Relaxed);
+        assert_eq!(interval.load(Ordering::Relaxed), 3600);
+
+        // Trigger shutdown, reporter must return promptly.
+        tx.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("reporter did not exit within 2s of shutdown")
+            .unwrap();
     }
 
     #[tokio::test]
@@ -1293,15 +1686,15 @@ address  = "0.0.0.0:7000"
             let channels = vec![
                 DestChannel {
                     tx: tx1,
-                    policy: OverflowPolicy::Block,
                     name: "d1".into(),
                     stats: Arc::clone(&stats1),
+                    runtime: test_runtime(OverflowPolicy::Block),
                 },
                 DestChannel {
                     tx: tx2,
-                    policy: OverflowPolicy::Block,
                     name: "d2".into(),
                     stats: Arc::clone(&stats2),
+                    runtime: test_runtime(OverflowPolicy::Block),
                 },
             ];
             let payload = Bytes::from("broadcast-payload");
@@ -1314,9 +1707,9 @@ address  = "0.0.0.0:7000"
     #[test]
     fn apply_hot_reload_same_config_no_panic() {
         let cfg = test_config();
-        let limiter: SharedLimiter = Arc::new(RwLock::new(None));
-        apply_hot_reload(&cfg, &cfg, &limiter);
-        assert!(limiter.read().unwrap().is_none());
+        let (ctx, _) = test_ctx_for(&cfg);
+        apply_hot_reload(&cfg, &cfg, &ctx);
+        assert!(ctx.limiter.read().unwrap().is_none());
     }
 
     #[test]

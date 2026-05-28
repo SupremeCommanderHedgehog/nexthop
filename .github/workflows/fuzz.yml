@@ -56,6 +56,11 @@ jobs:
             echo "seconds=300" >> "$GITHUB_OUTPUT"
           fi
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
       - uses: dtolnay/rust-toolchain@nightly
 
       # The fuzz crate depends transitively on Tauri (via nexthop_lib),
@@ -70,6 +75,17 @@ jobs:
             libgtk-3-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev
+
+      # `tauri::generate_context!()` is invoked from `lib.rs` and runs at
+      # compile time; it validates the tauri config against the
+      # filesystem and panics if `frontendDist` (the built `dist/`) is
+      # absent. The fuzz harnesses never call into the Tauri path, but
+      # nexthop_lib still has to compile, so we build the frontend
+      # exactly like the main Rust CI does.
+      - name: Build frontend
+        run: |
+          npm ci
+          npm run build
 
       - uses: Swatinem/rust-cache@v2
         with:

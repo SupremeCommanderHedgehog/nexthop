@@ -12,6 +12,7 @@ use crate::error::Result;
 use crate::rate_limiter::RateLimiter;
 use crate::stats::Stats;
 use crate::transport;
+use arc_swap::ArcSwap;
 use bytes::Bytes;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -22,6 +23,51 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, watch, Mutex};
 use tracing::{debug, error, info, warn};
+
+// ════════════════════════════════════════════════════════════════════
+//  Destination identity
+// ════════════════════════════════════════════════════════════════════
+
+/// Stable key used to match destinations across hot-reloads. Two configs
+/// describe "the same destination" iff their keys match; otherwise the
+/// supervisor treats the new entry as an add and the missing one as a
+/// remove.
+///
+/// Identity intentionally excludes mutable / cosmetic fields
+/// (`overflow_policy`, `reconnect_delay_ms`, `name`) so changes there
+/// take the in-place live-update path rather than respawning the task.
+#[derive(Clone, Debug, Hash, Eq, PartialEq)]
+pub struct DestKey {
+    pub protocol: Protocol,
+    pub mode: EndpointMode,
+    pub address: String,
+    pub cast_mode: CastMode,
+    pub multicast_interface: Option<String>,
+    pub multicast_interface_index: Option<u32>,
+}
+
+impl DestKey {
+    pub fn from_cfg(cfg: &DestConfig) -> Self {
+        Self {
+            protocol: cfg.protocol,
+            mode: cfg.mode,
+            address: cfg.address.clone(),
+            cast_mode: cfg.cast_mode,
+            multicast_interface: cfg.multicast_interface.clone(),
+            multicast_interface_index: cfg.multicast_interface_index,
+        }
+    }
+}
+
+/// Lock-free view of the live destination fan-out, swapped atomically
+/// when destinations are added or removed. Source tasks call
+/// `load_full()` once per packet to get a stable snapshot.
+pub(crate) type LiveChannels = Arc<ArcSwap<Vec<DestChannel>>>;
+
+/// Same lock-free pattern for the per-endpoint stats list the GUI reads
+/// through `commands::get_stats`. Order is: source first, then each
+/// destination in current config order.
+pub type LiveStats = Arc<ArcSwap<Vec<Arc<Stats>>>>;
 
 // ════════════════════════════════════════════════════════════════════
 //  Per-destination live state
@@ -82,6 +128,303 @@ impl DestRuntime {
 }
 
 // ════════════════════════════════════════════════════════════════════
+//  Destination supervisor
+// ════════════════════════════════════════════════════════════════════
+
+/// Owns the per-destination lifecycle: task handle, channel sender,
+/// per-destination shutdown, runtime atomics, and stats. The supervisor
+/// is keyed by `DestKey`, so adding, removing, or in-place updating a
+/// destination across hot-reloads never touches the others.
+pub(crate) struct DestEntry {
+    pub cfg: DestConfig,
+    pub tx: mpsc::Sender<Bytes>,
+    pub runtime: Arc<DestRuntime>,
+    pub stats: Arc<Stats>,
+    /// Only this destination's task observes this. The global relay
+    /// shutdown is signalled separately and reaches every task via
+    /// `global_shutdown_rx`.
+    pub shutdown_tx: Arc<watch::Sender<bool>>,
+    pub task: tokio::task::JoinHandle<()>,
+}
+
+/// Outcome of comparing the old vs new destination list. Pure data so
+/// it can be unit-tested without spinning a runtime.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct DiffPlan {
+    pub added: Vec<DestKey>,
+    pub removed: Vec<DestKey>,
+    pub kept: Vec<DestKey>,
+}
+
+pub(crate) fn diff_destinations(old: &[DestConfig], new: &[DestConfig]) -> DiffPlan {
+    let old_keys: HashSet<DestKey> = old.iter().map(DestKey::from_cfg).collect();
+    let new_keys: HashSet<DestKey> = new.iter().map(DestKey::from_cfg).collect();
+
+    let mut plan = DiffPlan::default();
+    for k in new.iter().map(DestKey::from_cfg) {
+        if old_keys.contains(&k) {
+            if !plan.kept.contains(&k) {
+                plan.kept.push(k);
+            }
+        } else if !plan.added.contains(&k) {
+            plan.added.push(k);
+        }
+    }
+    for k in old.iter().map(DestKey::from_cfg) {
+        if !new_keys.contains(&k) && !plan.removed.contains(&k) {
+            plan.removed.push(k);
+        }
+    }
+    plan
+}
+
+pub(crate) struct DestSupervisor {
+    entries: HashMap<DestKey, DestEntry>,
+    live_channels: LiveChannels,
+    live_stats: LiveStats,
+    /// Stats list always starts with the source's Stats; the supervisor
+    /// preserves that head element on every rebuild.
+    source_stats: Arc<Stats>,
+    channel_capacity: usize,
+    stats_interval_secs: Arc<AtomicU64>,
+    global_shutdown_rx: watch::Receiver<bool>,
+}
+
+impl DestSupervisor {
+    pub fn new(
+        source_stats: Arc<Stats>,
+        live_channels: LiveChannels,
+        live_stats: LiveStats,
+        channel_capacity: usize,
+        stats_interval_secs: Arc<AtomicU64>,
+        global_shutdown_rx: watch::Receiver<bool>,
+    ) -> Self {
+        Self {
+            entries: HashMap::new(),
+            live_channels,
+            live_stats,
+            source_stats,
+            channel_capacity,
+            stats_interval_secs,
+            global_shutdown_rx,
+        }
+    }
+
+    /// Insert a destination into the live set, spawning its task.
+    /// Caller is responsible for rebuilding live_channels / live_stats
+    /// after a batch of inserts via [`rebuild_views`].
+    fn spawn_entry(&self, cfg: DestConfig, stats: Arc<Stats>) -> DestEntry {
+        let runtime = Arc::new(DestRuntime::new(
+            cfg.overflow_policy,
+            cfg.reconnect_delay_ms.unwrap_or(2000),
+        ));
+        let (per_tx, per_rx) = watch::channel(false);
+        let shutdown_tx = Arc::new(per_tx);
+        // Combine the per-destination shutdown with the global one: the
+        // destination task only sees one receiver, and either signal
+        // triggers a clean exit.
+        let combined_shutdown_rx =
+            spawn_combined_shutdown_rx(per_rx, self.global_shutdown_rx.clone());
+
+        let (tx, rx) = mpsc::channel::<Bytes>(self.channel_capacity);
+
+        let name = cfg.display_name();
+        let cap = self.channel_capacity;
+        let runtime_for_task = Arc::clone(&runtime);
+        let stats_for_task = Arc::clone(&stats);
+        let stats_interval = Arc::clone(&self.stats_interval_secs);
+        let global_shutdown_for_reporter = self.global_shutdown_rx.clone();
+        let cfg_for_task = cfg.clone();
+
+        // Spawn the periodic stats reporter for this dest. It exits when
+        // the global shutdown fires; we don't tie it to per-dest shutdown
+        // because the GUI may still want the final stats snapshot.
+        tokio::spawn(crate::stats::run_reporter(
+            Arc::clone(&stats_for_task),
+            stats_interval,
+            global_shutdown_for_reporter,
+        ));
+
+        info!(dest = %name, proto = ?cfg.protocol, mode = ?cfg.mode, "destination starting");
+        let task = tokio::spawn(async move {
+            if let Err(e) = run_destination(
+                cfg_for_task,
+                runtime_for_task,
+                rx,
+                stats_for_task.clone(),
+                combined_shutdown_rx,
+                cap,
+            )
+            .await
+            {
+                error!(dest = %name, error = %e, "destination failed");
+                stats_for_task.add_error();
+            }
+        });
+
+        DestEntry {
+            cfg,
+            tx,
+            runtime,
+            stats,
+            shutdown_tx,
+            task,
+        }
+    }
+
+    /// Rebuild the `live_channels` and `live_stats` views from the
+    /// current `entries`, preserving the iteration order matching the
+    /// most recently applied config.
+    fn rebuild_views(&self, ordered_keys: &[DestKey]) {
+        let mut channels = Vec::with_capacity(ordered_keys.len());
+        let mut stats_vec: Vec<Arc<Stats>> = Vec::with_capacity(ordered_keys.len() + 1);
+        stats_vec.push(Arc::clone(&self.source_stats));
+        for k in ordered_keys {
+            if let Some(e) = self.entries.get(k) {
+                channels.push(DestChannel {
+                    tx: e.tx.clone(),
+                    name: e.cfg.display_name(),
+                    stats: Arc::clone(&e.stats),
+                    runtime: Arc::clone(&e.runtime),
+                });
+                stats_vec.push(Arc::clone(&e.stats));
+            }
+        }
+        self.live_channels.store(Arc::new(channels));
+        self.live_stats.store(Arc::new(stats_vec));
+    }
+
+    /// Spawn all entries described by `cfgs`, using pre-built `Stats`
+    /// (one per cfg, in matching order) so the GUI's startup snapshot
+    /// of `Relay::live_stats` already has the right `Arc<Stats>`
+    /// handles before `run()` reaches this point.
+    pub fn spawn_initial(&mut self, cfgs: &[DestConfig], stats: &[Arc<Stats>]) {
+        debug_assert_eq!(cfgs.len(), stats.len(), "stats vec must align with cfgs");
+        for (cfg, st) in cfgs.iter().zip(stats.iter()) {
+            let key = DestKey::from_cfg(cfg);
+            let entry = self.spawn_entry(cfg.clone(), Arc::clone(st));
+            self.entries.insert(key, entry);
+        }
+        let ordered: Vec<_> = cfgs.iter().map(DestKey::from_cfg).collect();
+        self.rebuild_views(&ordered);
+    }
+
+    /// Apply the difference between an already-running config and a new
+    /// one: spawn added entries, drain + drop removed entries, and
+    /// in-place mutate kept entries whose `overflow_policy` or
+    /// `reconnect_delay_ms` changed.
+    pub async fn apply_config(&mut self, old: &[DestConfig], new: &[DestConfig]) {
+        let plan = diff_destinations(old, new);
+
+        // ── kept: in-place update of policy + delay ────────────────
+        // Build name lookup against the new config so log lines reflect
+        // the current display name even if it changed.
+        let new_by_key: HashMap<DestKey, &DestConfig> =
+            new.iter().map(|c| (DestKey::from_cfg(c), c)).collect();
+
+        for key in &plan.kept {
+            let Some(entry) = self.entries.get_mut(key) else {
+                continue;
+            };
+            let new_cfg = match new_by_key.get(key) {
+                Some(c) => *c,
+                None => continue,
+            };
+            if entry.cfg.overflow_policy != new_cfg.overflow_policy {
+                entry.runtime.set_policy(new_cfg.overflow_policy);
+                info!(
+                    dest = %new_cfg.display_name(),
+                    policy = ?new_cfg.overflow_policy,
+                    "config reloaded: overflow_policy updated"
+                );
+            }
+            if entry.cfg.reconnect_delay_ms != new_cfg.reconnect_delay_ms {
+                let ms = new_cfg.reconnect_delay_ms.unwrap_or(2000);
+                entry.runtime.set_reconnect_delay_ms(ms);
+                info!(
+                    dest = %new_cfg.display_name(),
+                    reconnect_delay_ms = ms,
+                    "config reloaded: reconnect_delay_ms updated (takes effect on next reconnect)"
+                );
+            }
+            entry.cfg = new_cfg.clone();
+        }
+
+        // ── added: spawn new tasks ────────────────────────────────
+        for key in &plan.added {
+            let Some(new_cfg) = new_by_key.get(key) else {
+                continue;
+            };
+            info!(dest = %new_cfg.display_name(), "config reloaded: destination added");
+            let stats = Arc::new(build_dest_stats(new_cfg));
+            let entry = self.spawn_entry((*new_cfg).clone(), stats);
+            self.entries.insert(key.clone(), entry);
+        }
+
+        // ── views first, so the source stops seeing removed dests ─
+        let ordered: Vec<_> = new.iter().map(DestKey::from_cfg).collect();
+        self.rebuild_views(&ordered);
+
+        // ── removed: signal shutdown and await drain ──────────────
+        for key in &plan.removed {
+            if let Some(entry) = self.entries.remove(key) {
+                info!(dest = %entry.cfg.display_name(), "config reloaded: destination removed, draining");
+                let _ = entry.shutdown_tx.send(true);
+                // Drop the sender so the destination's rx.recv() returns
+                // None once in-flight packets drain.
+                drop(entry.tx);
+                let _ = tokio::time::timeout(Duration::from_secs(5), entry.task).await;
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+
+    #[cfg(test)]
+    pub fn entry_runtime(&self, key: &DestKey) -> Option<Arc<DestRuntime>> {
+        self.entries.get(key).map(|e| Arc::clone(&e.runtime))
+    }
+}
+
+/// Construct the per-destination `Stats` with the label format the rest
+/// of the codebase expects. Used by both `Relay::new` (for the startup
+/// snapshot) and the supervisor (for hot-reload adds).
+fn build_dest_stats(cfg: &DestConfig) -> Stats {
+    let local = if cfg.mode == EndpointMode::Server {
+        cfg.address.clone()
+    } else {
+        "(auto)".to_string()
+    };
+    let peer = if cfg.mode == EndpointMode::Client {
+        cfg.address.clone()
+    } else {
+        "(any)".to_string()
+    };
+    Stats::new(format!("dest({})", cfg.display_name()), local, peer)
+}
+
+/// Fan in two watch receivers into one. The returned receiver fires as
+/// soon as either source fires; the spawned task exits once that
+/// happens so it does not leak.
+fn spawn_combined_shutdown_rx(
+    mut a: watch::Receiver<bool>,
+    mut b: watch::Receiver<bool>,
+) -> watch::Receiver<bool> {
+    let (tx, rx) = watch::channel(false);
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = a.changed() => {}
+            _ = b.changed() => {}
+        }
+        let _ = tx.send(true);
+    });
+    rx
+}
+
+// ════════════════════════════════════════════════════════════════════
 //  Shared rate-limiter slot
 // ════════════════════════════════════════════════════════════════════
 
@@ -94,7 +437,7 @@ type SharedLimiter = Arc<RwLock<Option<Arc<RateLimiter>>>>;
 //  Per-destination channel
 // ════════════════════════════════════════════════════════════════════
 
-struct DestChannel {
+pub(crate) struct DestChannel {
     tx: mpsc::Sender<Bytes>,
     name: String,
     stats: Arc<Stats>,
@@ -104,9 +447,14 @@ struct DestChannel {
 /// Fan-out one packet to every destination, applying each destination's
 /// overflow policy independently. Policy is read fresh per packet so a
 /// hot-reload swap takes effect immediately without dropping the channel.
-async fn send_to_all(channels: &[DestChannel], data: Bytes) {
+///
+/// The snapshot is loaded once per call via `arc_swap::ArcSwap::load_full`,
+/// so add/remove of destinations between calls is observed without any
+/// locking on the per-packet path.
+async fn send_to_all(channels: &LiveChannels, data: Bytes) {
+    let snapshot = channels.load_full();
     let mut block_sends = Vec::new();
-    for ch in channels {
+    for ch in snapshot.iter() {
         match ch.runtime.policy() {
             OverflowPolicy::DropNewest => {
                 if ch.tx.try_send(data.clone()).is_err() {
@@ -147,13 +495,21 @@ pub struct Relay {
     /// each tick so an interval change takes effect on the next cycle
     /// without restarting the reporters.
     stats_interval_secs: Arc<AtomicU64>,
-    /// One per destination, in the same order as `config.destinations`.
-    /// Shared with both the source-side fan-out (overflow policy) and the
-    /// destination task (reconnect delay).
-    dest_runtime: Vec<Arc<DestRuntime>>,
     log_setter: LogLevelSetter,
     pub source_stats: Arc<Stats>,
+    /// Startup snapshot of per-destination `Stats`, in config order.
+    /// After `run()` starts and the supervisor has handled a hot-reload
+    /// add/remove, the canonical view lives in `live_stats`; this field
+    /// stays as the initial set so GUI/tests can read it from a
+    /// not-yet-started `Relay`.
     pub dest_stats: Vec<Arc<Stats>>,
+    /// Lock-free view consumed by the GUI's `get_stats`. Source stats
+    /// first, then each destination in current config order. The
+    /// supervisor swaps the inner `Vec` whenever destinations are added
+    /// or removed, so the GUI always reflects the live set without any
+    /// per-poll coordination.
+    pub live_stats: LiveStats,
+    live_channels: LiveChannels,
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
 }
@@ -188,47 +544,32 @@ impl Relay {
             src_local,
             src_peer,
         ));
-        let dest_stats = config
+        let dest_stats: Vec<Arc<Stats>> = config
             .destinations
             .iter()
-            .map(|d| {
-                let local = if d.mode == EndpointMode::Server {
-                    d.address.clone()
-                } else {
-                    "(auto)".to_string()
-                };
-                let peer = if d.mode == EndpointMode::Client {
-                    d.address.clone()
-                } else {
-                    "(any)".to_string()
-                };
-                Arc::new(Stats::new(
-                    format!("dest({})", d.display_name()),
-                    local,
-                    peer,
-                ))
-            })
-            .collect();
-        let dest_runtime = config
-            .destinations
-            .iter()
-            .map(|d| {
-                Arc::new(DestRuntime::new(
-                    d.overflow_policy,
-                    d.reconnect_delay_ms.unwrap_or(2000),
-                ))
-            })
+            .map(|d| Arc::new(build_dest_stats(d)))
             .collect();
         let stats_interval_secs = Arc::new(AtomicU64::new(config.general.stats_interval_secs));
+        // Live channels start empty; the supervisor populates them inside
+        // `run()` once it has a tokio runtime to spawn destinations into.
+        // Live stats can be pre-populated because Stats are pure data — the
+        // GUI / tests can read the initial set from `Relay::new` before
+        // `run()` starts.
+        let live_channels: LiveChannels = Arc::new(ArcSwap::from_pointee(Vec::new()));
+        let initial_stats_view: Vec<Arc<Stats>> = std::iter::once(Arc::clone(&source_stats))
+            .chain(dest_stats.iter().cloned())
+            .collect();
+        let live_stats: LiveStats = Arc::new(ArcSwap::from_pointee(initial_stats_view));
         Self {
             config_path,
             config,
             limiter: Arc::new(RwLock::new(limiter_val)),
             stats_interval_secs,
-            dest_runtime,
             log_setter,
             source_stats,
             dest_stats,
+            live_stats,
+            live_channels,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
         }
@@ -246,7 +587,8 @@ impl Relay {
 
         let mut task_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
-        // Per-source stats (pre-created in new() so the GUI can clone them before run())
+        // Per-source stats reporter. The supervisor owns the per-dest
+        // reporters; this one just covers the source endpoint.
         let src_name = self.config.source.display_name();
         let source_stats = Arc::clone(&self.source_stats);
         task_handles.push(tokio::spawn(crate::stats::run_reporter(
@@ -255,7 +597,18 @@ impl Relay {
             self.shutdown_rx.clone(),
         )));
 
-        let mut all_stats: Vec<Arc<Stats>> = vec![Arc::clone(&source_stats)];
+        // Build and seed the destination supervisor before spawning the
+        // source so the source's first packet sees the full live set.
+        let mut supervisor = DestSupervisor::new(
+            Arc::clone(&self.source_stats),
+            Arc::clone(&self.live_channels),
+            Arc::clone(&self.live_stats),
+            cap,
+            Arc::clone(&self.stats_interval_secs),
+            self.shutdown_rx.clone(),
+        );
+        supervisor.spawn_initial(&self.config.destinations, &self.dest_stats);
+        let supervisor = Arc::new(tokio::sync::Mutex::new(supervisor));
 
         // Config hot-reload watcher — wrap startup config so the watcher can
         // track the last-reloaded baseline rather than comparing forever against
@@ -264,7 +617,7 @@ impl Relay {
         let hot_ctx = HotReloadCtx {
             limiter: Arc::clone(&self.limiter),
             stats_interval_secs: Arc::clone(&self.stats_interval_secs),
-            dest_runtime: self.dest_runtime.clone(),
+            supervisor: Arc::clone(&supervisor),
             log_setter: Arc::clone(&self.log_setter),
         };
         task_handles.push(spawn_config_watcher(
@@ -274,56 +627,19 @@ impl Relay {
             self.shutdown_rx.clone(),
         ));
 
-        // Create one mpsc channel + one Stats instance per destination.
-        let mut dest_channels: Vec<DestChannel> =
-            Vec::with_capacity(self.config.destinations.len());
-        for (idx, dest) in self.config.destinations.iter().enumerate() {
-            let (tx, rx) = mpsc::channel::<Bytes>(cap);
-            let name = dest.display_name();
-            let dest_stats = Arc::clone(&self.dest_stats[idx]);
-            let runtime = Arc::clone(&self.dest_runtime[idx]);
-
-            task_handles.push(tokio::spawn(crate::stats::run_reporter(
-                Arc::clone(&dest_stats),
-                Arc::clone(&self.stats_interval_secs),
-                self.shutdown_rx.clone(),
-            )));
-
-            all_stats.push(Arc::clone(&dest_stats));
-            dest_channels.push(DestChannel {
-                tx,
-                name: name.clone(),
-                stats: Arc::clone(&dest_stats),
-                runtime: Arc::clone(&runtime),
-            });
-
-            let cfg = dest.clone();
-            let sd = self.shutdown_rx.clone();
-            info!(dest = %name, index = idx, proto = ?cfg.protocol, mode = ?cfg.mode, "destination starting");
-            task_handles.push(tokio::spawn(async move {
-                if let Err(e) = run_destination(cfg, runtime, rx, dest_stats.clone(), sd, cap).await
-                {
-                    error!(dest = %name, error = %e, "destination failed");
-                    dest_stats.add_error();
-                }
-            }));
-        }
-
         if let Some(port) = self.config.general.health_port {
             task_handles.push(spawn_health_server(
                 port,
-                all_stats,
+                Arc::clone(&self.live_stats),
                 self.shutdown_rx.clone(),
             ));
         }
-
-        let channels: Arc<Vec<DestChannel>> = Arc::new(dest_channels);
 
         info!(source = %src_name, proto = ?self.config.source.protocol, mode = ?self.config.source.mode, "source starting");
 
         let source_fut = run_source(
             self.config.source.clone(),
-            Arc::clone(&channels),
+            Arc::clone(&self.live_channels),
             Arc::clone(&source_stats),
             Arc::clone(&self.limiter),
             max_payload,
@@ -393,11 +709,10 @@ async fn wait_for_shutdown_signal() -> &'static str {
 
 /// Handles `apply_hot_reload` writes through to mutate live state without
 /// restarting tasks. All fields are independently swappable.
-pub struct HotReloadCtx {
+pub(crate) struct HotReloadCtx {
     pub limiter: SharedLimiter,
     pub stats_interval_secs: Arc<AtomicU64>,
-    /// One per destination, in the same order as `RelayConfig.destinations`.
-    pub dest_runtime: Vec<Arc<DestRuntime>>,
+    pub supervisor: Arc<tokio::sync::Mutex<DestSupervisor>>,
     pub log_setter: LogLevelSetter,
 }
 
@@ -451,7 +766,7 @@ fn spawn_config_watcher(
                                 .read()
                                 .unwrap_or_else(|p| p.into_inner())
                                 .clone();
-                            apply_hot_reload(&old, &new_cfg, &ctx);
+                            apply_hot_reload(&old, &new_cfg, &ctx).await;
                             *current_cfg.write().unwrap_or_else(|p| p.into_inner()) = new_cfg;
                         }
                         Err(e) => warn!(error = %e, "config reload failed, keeping current settings"),
@@ -469,7 +784,7 @@ fn spawn_config_watcher(
 
 fn spawn_health_server(
     port: u16,
-    all_stats: Vec<Arc<Stats>>,
+    live_stats: LiveStats,
     mut shutdown: watch::Receiver<bool>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -494,7 +809,7 @@ fn spawn_health_server(
                         Ok((stream, _)) => {
                             match Arc::clone(&sem).try_acquire_owned() {
                                 Ok(permit) => {
-                                    let stats = all_stats.clone();
+                                    let stats = Arc::clone(&live_stats);
                                     tokio::spawn(async move {
                                         handle_health_request(stream, stats).await;
                                         drop(permit);
@@ -512,16 +827,18 @@ fn spawn_health_server(
     })
 }
 
-async fn handle_health_request(stream: tokio::net::TcpStream, all_stats: Vec<Arc<Stats>>) {
+async fn handle_health_request(stream: tokio::net::TcpStream, live_stats: LiveStats) {
     // Drop the connection if the client stalls during request or response.
     let _ = tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        serve_health_request(stream, all_stats),
+        serve_health_request(stream, live_stats),
     )
     .await;
 }
 
-async fn serve_health_request(stream: tokio::net::TcpStream, all_stats: Vec<Arc<Stats>>) {
+async fn serve_health_request(stream: tokio::net::TcpStream, live_stats: LiveStats) {
+    let all_stats = live_stats.load_full();
+    let all_stats: &[Arc<Stats>] = all_stats.as_slice();
     let (reader_half, mut writer) = stream.into_split();
     let mut reader = tokio::io::BufReader::new(reader_half);
 
@@ -586,11 +903,11 @@ async fn serve_health_request(stream: tokio::net::TcpStream, all_stats: Vec<Arc<
 /// Apply the fields that can be changed without restarting tasks.
 ///
 /// Live: rate_limit, general.log_level, general.stats_interval_secs, and
-/// per-destination overflow_policy + reconnect_delay_ms (matched by index
-/// when source identity is unchanged). Anything else still requires a
-/// restart, and we log a single targeted warning naming the offending
-/// area instead of a blanket "something changed" message.
-fn apply_hot_reload(old: &RelayConfig, new: &RelayConfig, ctx: &HotReloadCtx) {
+/// the full destination set (add/remove/update via the supervisor).
+/// Source and a small set of process-global general fields still need a
+/// restart; we log a single targeted warning naming the offending area
+/// instead of a blanket "something changed" message.
+async fn apply_hot_reload(old: &RelayConfig, new: &RelayConfig, ctx: &HotReloadCtx) {
     // ── rate_limit ────────────────────────────────────────────────
     if old.rate_limit != new.rate_limit {
         let new_limiter = new
@@ -633,49 +950,10 @@ fn apply_hot_reload(old: &RelayConfig, new: &RelayConfig, ctx: &HotReloadCtx) {
         );
     }
 
-    // ── per-destination policy + reconnect delay ──────────────────
-    // Only safe to match by index while the destination identity
-    // (protocol + mode + address + cast_mode) is unchanged. Add/remove
-    // and identity-change live updates land with the supervisor refactor.
-    let identity_matches = old.destinations.len() == new.destinations.len()
-        && old
-            .destinations
-            .iter()
-            .zip(new.destinations.iter())
-            .all(|(o, n)| {
-                o.protocol == n.protocol
-                    && o.mode == n.mode
-                    && o.address == n.address
-                    && o.cast_mode == n.cast_mode
-            });
-    if identity_matches {
-        for (idx, (o, n)) in old
-            .destinations
-            .iter()
-            .zip(new.destinations.iter())
-            .enumerate()
-        {
-            let rt = &ctx.dest_runtime[idx];
-            if o.overflow_policy != n.overflow_policy {
-                rt.set_policy(n.overflow_policy);
-                info!(
-                    dest = %n.display_name(),
-                    policy = ?n.overflow_policy,
-                    "config reloaded: overflow_policy updated"
-                );
-            }
-            if o.reconnect_delay_ms != n.reconnect_delay_ms {
-                let ms = n.reconnect_delay_ms.unwrap_or(2000);
-                rt.set_reconnect_delay_ms(ms);
-                info!(
-                    dest = %n.display_name(),
-                    reconnect_delay_ms = ms,
-                    "config reloaded: reconnect_delay_ms updated (takes effect on next reconnect)"
-                );
-            }
-        }
-    } else {
-        warn!("config reloaded: adding, removing, or relocating destinations requires a restart");
+    // ── destinations: full add/remove/update via supervisor ───────
+    if old.destinations != new.destinations {
+        let mut sup = ctx.supervisor.lock().await;
+        sup.apply_config(&old.destinations, &new.destinations).await;
     }
 
     // ── still-restart-required surfaces ───────────────────────────
@@ -690,26 +968,6 @@ fn apply_hot_reload(old: &RelayConfig, new: &RelayConfig, ctx: &HotReloadCtx) {
     {
         warn!("config reloaded: channel_capacity, max_payload_size, and health_port require a restart");
     }
-    // Per-dest identity fields beyond policy + delay (multicast settings,
-    // names, etc) also require restart while identity_matches is true.
-    if identity_matches {
-        let any_other_dest_change =
-            old.destinations
-                .iter()
-                .zip(new.destinations.iter())
-                .any(|(o, n)| {
-                    let mut o_norm = o.clone();
-                    let n_norm = n.clone();
-                    // Mask the live-update fields so the remaining diff highlights
-                    // restart-required changes only.
-                    o_norm.overflow_policy = n_norm.overflow_policy;
-                    o_norm.base.reconnect_delay_ms = n_norm.base.reconnect_delay_ms;
-                    o_norm != n_norm
-                });
-        if any_other_dest_change {
-            warn!("config reloaded: per-destination changes beyond overflow_policy and reconnect_delay_ms require a restart");
-        }
-    }
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -718,7 +976,7 @@ fn apply_hot_reload(old: &RelayConfig, new: &RelayConfig, ctx: &HotReloadCtx) {
 
 async fn run_source(
     cfg: EndpointConfig,
-    channels: Arc<Vec<DestChannel>>,
+    channels: LiveChannels,
     stats: Arc<Stats>,
     limiter: SharedLimiter,
     max_payload: usize,
@@ -741,7 +999,7 @@ async fn run_source(
 
 async fn source_tcp_server(
     cfg: EndpointConfig,
-    channels: Arc<Vec<DestChannel>>,
+    channels: LiveChannels,
     stats: Arc<Stats>,
     limiter: SharedLimiter,
     max_payload: usize,
@@ -785,7 +1043,7 @@ async fn source_tcp_server(
 
 async fn source_tcp_client(
     cfg: EndpointConfig,
-    channels: Arc<Vec<DestChannel>>,
+    channels: LiveChannels,
     stats: Arc<Stats>,
     limiter: SharedLimiter,
     max_payload: usize,
@@ -827,7 +1085,7 @@ async fn source_tcp_client(
 
 async fn relay_tcp_reader(
     mut stream: TcpStream,
-    channels: &[DestChannel],
+    channels: &LiveChannels,
     stats: &Stats,
     limiter: &SharedLimiter,
     max_payload: usize,
@@ -860,7 +1118,7 @@ async fn relay_tcp_reader(
 
 async fn source_udp(
     cfg: EndpointConfig,
-    channels: Arc<Vec<DestChannel>>,
+    channels: LiveChannels,
     stats: Arc<Stats>,
     limiter: SharedLimiter,
     max_payload: usize,
@@ -1238,32 +1496,47 @@ address  = "127.0.0.1:0"
         Arc::new(DestRuntime::new(policy, 2000))
     }
 
-    fn test_ctx_for(cfg: &RelayConfig) -> (HotReloadCtx, Vec<Arc<Stats>>) {
-        let limiter: SharedLimiter = Arc::new(RwLock::new(None));
-        let dest_runtime: Vec<_> = cfg
+    fn wrap_channels(channels: Vec<DestChannel>) -> LiveChannels {
+        Arc::new(ArcSwap::from_pointee(channels))
+    }
+
+    fn wrap_stats(stats: Vec<Arc<Stats>>) -> LiveStats {
+        Arc::new(ArcSwap::from_pointee(stats))
+    }
+
+    /// Build a `HotReloadCtx` whose supervisor mirrors `cfg.destinations`.
+    /// Spawns real destination tasks against the cfg endpoints — for unit
+    /// tests this is fine because TCP-client tasks to `127.0.0.1:0` just
+    /// fail to connect repeatedly; we never assert anything about their
+    /// side effects.
+    async fn test_ctx_for(cfg: &RelayConfig) -> HotReloadCtx {
+        let (_sd_tx, sd_rx) = watch::channel(false);
+        let source_stats = Arc::new(Stats::new("source(test)", "", ""));
+        let dest_stats: Vec<Arc<Stats>> = cfg
             .destinations
             .iter()
-            .map(|d| {
-                Arc::new(DestRuntime::new(
-                    d.overflow_policy,
-                    d.reconnect_delay_ms.unwrap_or(2000),
-                ))
-            })
+            .map(|d| Arc::new(build_dest_stats(d)))
             .collect();
-        let stats: Vec<_> = cfg
-            .destinations
-            .iter()
-            .map(|_| Arc::new(Stats::new("test", "", "")))
-            .collect();
-        (
-            HotReloadCtx {
-                limiter,
-                stats_interval_secs: Arc::new(AtomicU64::new(cfg.general.stats_interval_secs)),
-                dest_runtime,
-                log_setter: noop_log_setter(),
-            },
-            stats,
-        )
+        let live_channels = wrap_channels(Vec::new());
+        let live_stats = wrap_stats(vec![Arc::clone(&source_stats)]);
+        let stats_interval_secs = Arc::new(AtomicU64::new(cfg.general.stats_interval_secs));
+
+        let mut supervisor = DestSupervisor::new(
+            Arc::clone(&source_stats),
+            Arc::clone(&live_channels),
+            Arc::clone(&live_stats),
+            cfg.general.channel_capacity.max(1),
+            Arc::clone(&stats_interval_secs),
+            sd_rx,
+        );
+        supervisor.spawn_initial(&cfg.destinations, &dest_stats);
+
+        HotReloadCtx {
+            limiter: Arc::new(RwLock::new(None)),
+            stats_interval_secs,
+            supervisor: Arc::new(tokio::sync::Mutex::new(supervisor)),
+            log_setter: noop_log_setter(),
+        }
     }
 
     #[tokio::test]
@@ -1277,7 +1550,8 @@ address  = "127.0.0.1:0"
             stats: Arc::clone(&stats),
             runtime: test_runtime(OverflowPolicy::DropNewest),
         };
-        send_to_all(&[ch], Bytes::from("overflow")).await;
+        let channels = wrap_channels(vec![ch]);
+        send_to_all(&channels, Bytes::from("overflow")).await;
         assert_eq!(stats.dropped_messages.load(Ordering::Relaxed), 1);
         assert!(rx.try_recv().is_ok()); // original fill item still there
     }
@@ -1292,44 +1566,45 @@ address  = "127.0.0.1:0"
             stats: Arc::clone(&stats),
             runtime: test_runtime(OverflowPolicy::Block),
         };
+        let channels = wrap_channels(vec![ch]);
         let data = Bytes::from("hello");
-        send_to_all(&[ch], data.clone()).await;
+        send_to_all(&channels, data.clone()).await;
         let received = rx.recv().await.unwrap();
         assert_eq!(received, data);
         assert_eq!(stats.dropped_messages.load(Ordering::Relaxed), 0);
     }
 
-    #[test]
-    fn apply_hot_reload_installs_rate_limiter() {
+    #[tokio::test]
+    async fn apply_hot_reload_installs_rate_limiter() {
         let old = test_config();
         let mut new = test_config();
         new.rate_limit = Some(RateLimitConfig {
             bytes_per_second: 500,
             burst_size: 1000,
         });
-        let (ctx, _) = test_ctx_for(&old);
-        apply_hot_reload(&old, &new, &ctx);
+        let ctx = test_ctx_for(&old).await;
+        apply_hot_reload(&old, &new, &ctx).await;
         assert!(ctx.limiter.read().unwrap().is_some());
     }
 
-    #[test]
-    fn apply_hot_reload_removes_rate_limiter() {
+    #[tokio::test]
+    async fn apply_hot_reload_removes_rate_limiter() {
         let mut old = test_config();
         old.rate_limit = Some(RateLimitConfig {
             bytes_per_second: 1000,
             burst_size: 5000,
         });
         let new = test_config(); // no rate_limit
-        let (ctx, _) = test_ctx_for(&old);
+        let ctx = test_ctx_for(&old).await;
         *ctx.limiter.write().unwrap() = Some(Arc::new(RateLimiter::new(1000, 5000)));
-        apply_hot_reload(&old, &new, &ctx);
+        apply_hot_reload(&old, &new, &ctx).await;
         assert!(ctx.limiter.read().unwrap().is_none());
     }
 
     // ── New live-field hot-reload coverage ────────────────────────
 
-    #[test]
-    fn apply_hot_reload_updates_log_level_via_setter() {
+    #[tokio::test]
+    async fn apply_hot_reload_updates_log_level_via_setter() {
         use std::sync::Mutex;
         let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_clone = Arc::clone(&captured);
@@ -1343,15 +1618,15 @@ address  = "127.0.0.1:0"
         let mut new = test_config();
         new.general.log_level = "debug".to_string();
 
-        let (mut ctx, _) = test_ctx_for(&old);
+        let mut ctx = test_ctx_for(&old).await;
         ctx.log_setter = setter;
 
-        apply_hot_reload(&old, &new, &ctx);
+        apply_hot_reload(&old, &new, &ctx).await;
         assert_eq!(captured.lock().unwrap().as_slice(), &["debug".to_string()]);
     }
 
-    #[test]
-    fn apply_hot_reload_skips_log_level_when_unchanged() {
+    #[tokio::test]
+    async fn apply_hot_reload_skips_log_level_when_unchanged() {
         use std::sync::Mutex;
         let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_clone = Arc::clone(&captured);
@@ -1361,75 +1636,229 @@ address  = "127.0.0.1:0"
         });
 
         let cfg = test_config();
-        let (mut ctx, _) = test_ctx_for(&cfg);
+        let mut ctx = test_ctx_for(&cfg).await;
         ctx.log_setter = setter;
 
-        apply_hot_reload(&cfg, &cfg, &ctx);
+        apply_hot_reload(&cfg, &cfg, &ctx).await;
         assert!(captured.lock().unwrap().is_empty());
     }
 
-    #[test]
-    fn apply_hot_reload_updates_stats_interval_atomic() {
+    #[tokio::test]
+    async fn apply_hot_reload_updates_stats_interval_atomic() {
         let mut old = test_config();
         old.general.stats_interval_secs = 30;
         let mut new = test_config();
         new.general.stats_interval_secs = 5;
 
-        let (ctx, _) = test_ctx_for(&old);
+        let ctx = test_ctx_for(&old).await;
         ctx.stats_interval_secs.store(30, Ordering::Relaxed);
 
-        apply_hot_reload(&old, &new, &ctx);
+        apply_hot_reload(&old, &new, &ctx).await;
         assert_eq!(ctx.stats_interval_secs.load(Ordering::Relaxed), 5);
     }
 
-    #[test]
-    fn apply_hot_reload_updates_overflow_policy_atomic() {
+    #[tokio::test]
+    async fn apply_hot_reload_updates_overflow_policy_atomic() {
         let mut old = test_config();
         old.destinations[0].overflow_policy = OverflowPolicy::DropNewest;
         let mut new = test_config();
         new.destinations[0].overflow_policy = OverflowPolicy::Block;
 
-        let (ctx, _) = test_ctx_for(&old);
-        assert_eq!(ctx.dest_runtime[0].policy(), OverflowPolicy::DropNewest);
+        let ctx = test_ctx_for(&old).await;
+        let key = DestKey::from_cfg(&old.destinations[0]);
+        let rt = ctx
+            .supervisor
+            .lock()
+            .await
+            .entry_runtime(&key)
+            .expect("entry");
+        assert_eq!(rt.policy(), OverflowPolicy::DropNewest);
 
-        apply_hot_reload(&old, &new, &ctx);
-        assert_eq!(ctx.dest_runtime[0].policy(), OverflowPolicy::Block);
+        apply_hot_reload(&old, &new, &ctx).await;
+        assert_eq!(rt.policy(), OverflowPolicy::Block);
     }
 
-    #[test]
-    fn apply_hot_reload_updates_reconnect_delay_atomic() {
+    #[tokio::test]
+    async fn apply_hot_reload_updates_reconnect_delay_atomic() {
         let mut old = test_config();
         old.destinations[0].base.reconnect_delay_ms = Some(2000);
         let mut new = test_config();
         new.destinations[0].base.reconnect_delay_ms = Some(500);
 
-        let (ctx, _) = test_ctx_for(&old);
-        ctx.dest_runtime[0].set_reconnect_delay_ms(2000);
+        let ctx = test_ctx_for(&old).await;
+        let key = DestKey::from_cfg(&old.destinations[0]);
+        let rt = ctx
+            .supervisor
+            .lock()
+            .await
+            .entry_runtime(&key)
+            .expect("entry");
 
-        apply_hot_reload(&old, &new, &ctx);
-        assert_eq!(
-            ctx.dest_runtime[0].reconnect_delay(),
-            Duration::from_millis(500)
-        );
+        apply_hot_reload(&old, &new, &ctx).await;
+        assert_eq!(rt.reconnect_delay(), Duration::from_millis(500));
     }
 
-    #[test]
-    fn apply_hot_reload_skips_policy_update_when_dest_identity_changes() {
+    #[tokio::test]
+    async fn apply_hot_reload_identity_change_swaps_entry_not_in_place() {
         let old = test_config();
         let mut new = test_config();
-        // Change the destination address — identity diverges, so per-dest
-        // live updates must NOT silently fire on an unrelated slot.
+        // Different address ⇒ different DestKey ⇒ old entry removed,
+        // new entry spawned; the supervisor must NOT keep the old key.
         new.destinations[0].base.address = "127.0.0.1:1".to_string();
         new.destinations[0].overflow_policy = OverflowPolicy::Block;
 
-        let (ctx, _) = test_ctx_for(&old);
-        let initial = ctx.dest_runtime[0].policy();
-        apply_hot_reload(&old, &new, &ctx);
-        assert_eq!(
-            ctx.dest_runtime[0].policy(),
-            initial,
-            "policy must not update when dest identity changes"
+        let ctx = test_ctx_for(&old).await;
+        let old_key = DestKey::from_cfg(&old.destinations[0]);
+        let new_key = DestKey::from_cfg(&new.destinations[0]);
+
+        apply_hot_reload(&old, &new, &ctx).await;
+        let sup = ctx.supervisor.lock().await;
+        assert!(
+            sup.entry_runtime(&old_key).is_none(),
+            "old key should be gone"
         );
+        assert!(
+            sup.entry_runtime(&new_key).is_some(),
+            "new key should exist"
+        );
+        assert_eq!(sup.entry_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn apply_hot_reload_adds_new_destination() {
+        let old = test_config();
+        let mut new = test_config();
+        new.destinations.push(DestConfig {
+            base: EndpointConfig {
+                name: None,
+                protocol: Protocol::Tcp,
+                mode: EndpointMode::Client,
+                address: "127.0.0.1:2".to_string(),
+                cast_mode: CastMode::Unicast,
+                multicast_interface: None,
+                multicast_interface_index: None,
+                multicast_ttl: 16,
+                reconnect_delay_ms: None,
+            },
+            overflow_policy: OverflowPolicy::DropNewest,
+        });
+
+        let ctx = test_ctx_for(&old).await;
+        let added_key = DestKey::from_cfg(&new.destinations[1]);
+
+        apply_hot_reload(&old, &new, &ctx).await;
+        let sup = ctx.supervisor.lock().await;
+        assert_eq!(sup.entry_count(), 2);
+        assert!(sup.entry_runtime(&added_key).is_some());
+    }
+
+    #[tokio::test]
+    async fn apply_hot_reload_removes_destination() {
+        let mut old = test_config();
+        // Add a second dest so we can remove one without going empty
+        // (validate() would reject an empty destinations list).
+        old.destinations.push(DestConfig {
+            base: EndpointConfig {
+                name: None,
+                protocol: Protocol::Tcp,
+                mode: EndpointMode::Client,
+                address: "127.0.0.1:3".to_string(),
+                cast_mode: CastMode::Unicast,
+                multicast_interface: None,
+                multicast_interface_index: None,
+                multicast_ttl: 16,
+                reconnect_delay_ms: None,
+            },
+            overflow_policy: OverflowPolicy::DropNewest,
+        });
+        let mut new = old.clone();
+        let removed_key = DestKey::from_cfg(&old.destinations[1]);
+        new.destinations.remove(1);
+
+        let ctx = test_ctx_for(&old).await;
+        assert_eq!(ctx.supervisor.lock().await.entry_count(), 2);
+
+        apply_hot_reload(&old, &new, &ctx).await;
+        let sup = ctx.supervisor.lock().await;
+        assert_eq!(sup.entry_count(), 1);
+        assert!(sup.entry_runtime(&removed_key).is_none());
+    }
+
+    // ── Pure diff function ────────────────────────────────────────
+
+    fn dest_cfg(address: &str) -> DestConfig {
+        DestConfig {
+            base: EndpointConfig {
+                name: None,
+                protocol: Protocol::Tcp,
+                mode: EndpointMode::Client,
+                address: address.to_string(),
+                cast_mode: CastMode::Unicast,
+                multicast_interface: None,
+                multicast_interface_index: None,
+                multicast_ttl: 16,
+                reconnect_delay_ms: None,
+            },
+            overflow_policy: OverflowPolicy::DropNewest,
+        }
+    }
+
+    #[test]
+    fn diff_destinations_empty_to_empty() {
+        let plan = diff_destinations(&[], &[]);
+        assert_eq!(plan, DiffPlan::default());
+    }
+
+    #[test]
+    fn diff_destinations_pure_add() {
+        let a = dest_cfg("127.0.0.1:1");
+        let plan = diff_destinations(&[], std::slice::from_ref(&a));
+        assert_eq!(plan.added, vec![DestKey::from_cfg(&a)]);
+        assert!(plan.removed.is_empty());
+        assert!(plan.kept.is_empty());
+    }
+
+    #[test]
+    fn diff_destinations_pure_remove() {
+        let a = dest_cfg("127.0.0.1:1");
+        let plan = diff_destinations(std::slice::from_ref(&a), &[]);
+        assert_eq!(plan.removed, vec![DestKey::from_cfg(&a)]);
+        assert!(plan.added.is_empty());
+        assert!(plan.kept.is_empty());
+    }
+
+    #[test]
+    fn diff_destinations_identity_change_is_add_plus_remove() {
+        let a = dest_cfg("127.0.0.1:1");
+        let b = dest_cfg("127.0.0.1:2");
+        let plan = diff_destinations(std::slice::from_ref(&a), std::slice::from_ref(&b));
+        assert_eq!(plan.added, vec![DestKey::from_cfg(&b)]);
+        assert_eq!(plan.removed, vec![DestKey::from_cfg(&a)]);
+        assert!(plan.kept.is_empty());
+    }
+
+    #[test]
+    fn diff_destinations_policy_change_is_kept_not_add_remove() {
+        let mut a = dest_cfg("127.0.0.1:1");
+        let b = a.clone();
+        a.overflow_policy = OverflowPolicy::Block;
+        let plan = diff_destinations(std::slice::from_ref(&a), std::slice::from_ref(&b));
+        assert!(plan.added.is_empty());
+        assert!(plan.removed.is_empty());
+        assert_eq!(plan.kept, vec![DestKey::from_cfg(&a)]);
+    }
+
+    #[test]
+    fn diff_destinations_partial_overlap() {
+        let a = dest_cfg("127.0.0.1:1");
+        let b = dest_cfg("127.0.0.1:2");
+        let c = dest_cfg("127.0.0.1:3");
+        let old = vec![a.clone(), b.clone()];
+        let new = vec![b.clone(), c.clone()];
+        let plan = diff_destinations(&old, &new);
+        assert_eq!(plan.added, vec![DestKey::from_cfg(&c)]);
+        assert_eq!(plan.removed, vec![DestKey::from_cfg(&a)]);
+        assert_eq!(plan.kept, vec![DestKey::from_cfg(&b)]);
     }
 
     #[tokio::test]
@@ -1472,7 +1901,7 @@ address  = "127.0.0.1:0"
             let stats = stats.clone();
             tokio::spawn(async move {
                 let (stream, _) = listener.accept().await.unwrap();
-                serve_health_request(stream, stats).await;
+                serve_health_request(stream, wrap_stats(stats)).await;
             })
         };
 
@@ -1501,7 +1930,7 @@ address  = "127.0.0.1:0"
             let stats = stats.clone();
             tokio::spawn(async move {
                 let (stream, _) = listener.accept().await.unwrap();
-                serve_health_request(stream, stats).await;
+                serve_health_request(stream, wrap_stats(stats)).await;
             })
         };
 
@@ -1533,7 +1962,7 @@ address  = "127.0.0.1:0"
             let stats = stats.clone();
             tokio::spawn(async move {
                 let (stream, _) = listener.accept().await.unwrap();
-                serve_health_request(stream, stats).await;
+                serve_health_request(stream, wrap_stats(stats)).await;
             })
         };
 
@@ -1579,7 +2008,7 @@ address  = "127.0.0.1:0"
 
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            serve_health_request(stream, stats).await;
+            serve_health_request(stream, wrap_stats(stats)).await;
         });
 
         let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
@@ -1683,7 +2112,7 @@ address  = "0.0.0.0:7000"
             let (tx2, mut rx2) = mpsc::channel::<Bytes>(4);
             let stats1 = Arc::new(Stats::new("d1", "", ""));
             let stats2 = Arc::new(Stats::new("d2", "", ""));
-            let channels = vec![
+            let channels = wrap_channels(vec![
                 DestChannel {
                     tx: tx1,
                     name: "d1".into(),
@@ -1696,7 +2125,7 @@ address  = "0.0.0.0:7000"
                     stats: Arc::clone(&stats2),
                     runtime: test_runtime(OverflowPolicy::Block),
                 },
-            ];
+            ]);
             let payload = Bytes::from("broadcast-payload");
             send_to_all(&channels, payload.clone()).await;
             assert_eq!(rx1.recv().await.unwrap(), payload);
@@ -1704,11 +2133,11 @@ address  = "0.0.0.0:7000"
         });
     }
 
-    #[test]
-    fn apply_hot_reload_same_config_no_panic() {
+    #[tokio::test]
+    async fn apply_hot_reload_same_config_no_panic() {
         let cfg = test_config();
-        let (ctx, _) = test_ctx_for(&cfg);
-        apply_hot_reload(&cfg, &cfg, &ctx);
+        let ctx = test_ctx_for(&cfg).await;
+        apply_hot_reload(&cfg, &cfg, &ctx).await;
         assert!(ctx.limiter.read().unwrap().is_none());
     }
 
@@ -1728,7 +2157,7 @@ address  = "0.0.0.0:7000"
         let stats: Vec<Arc<Stats>> = vec![];
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            serve_health_request(stream, stats).await;
+            serve_health_request(stream, wrap_stats(stats)).await;
         });
         let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
         client
@@ -1759,7 +2188,7 @@ address  = "0.0.0.0:7000"
         let stats = vec![Arc::clone(&s1), Arc::clone(&s2)];
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            serve_health_request(stream, stats).await;
+            serve_health_request(stream, wrap_stats(stats)).await;
         });
         let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
         client
@@ -1780,7 +2209,7 @@ address  = "0.0.0.0:7000"
         let stats: Vec<Arc<Stats>> = vec![];
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            serve_health_request(stream, stats).await;
+            serve_health_request(stream, wrap_stats(stats)).await;
         });
         let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
         client

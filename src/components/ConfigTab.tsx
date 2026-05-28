@@ -79,6 +79,12 @@ function splitAddress(addr: string): { host: string; port: string } {
   return { host, port };
 }
 
+function isMulticastAddress(host: string): boolean {
+  if (/^(22[4-9]|23[0-9])(\.\d{1,3}){3}$/.test(host)) return true;
+  if (/^ff[0-9a-fA-F]{2}:/i.test(host)) return true;
+  return false;
+}
+
 const HOSTNAME_RE =
   /^(?=.{1,253}$)([a-zA-Z0-9-]{1,63})(\.[a-zA-Z0-9-]{1,63})*$/;
 const IPV4_RE = /^(\d{1,3})(\.\d{1,3}){3}$/;
@@ -344,7 +350,7 @@ export default function ConfigTab({
                   (() => {
                     const p = config.source.address.split(":");
                     const h = p.slice(0, -1).join(":") || p[0];
-                    return h && !/^(22[4-9]|23[0-9])(\.\d{1,3}){3}$/.test(h)
+                    return h && !isMulticastAddress(h)
                       ? "border-red-400 dark:border-red-500"
                       : "border-gray-300 dark:border-gray-600";
                   })()
@@ -524,7 +530,7 @@ export default function ConfigTab({
                           }
                           placeholder="224.0.0.x"
                           className={`border rounded px-2 py-1 text-sm bg-white dark:bg-gray-800 w-36 ${
-                            host && !/^(22[4-9]|23[0-9])(\.\d{1,3}){3}$/.test(host)
+                            host && !isMulticastAddress(host)
                               ? "border-red-400 dark:border-red-500"
                               : "border-gray-300 dark:border-gray-600"
                           }`}

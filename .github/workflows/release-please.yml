@@ -1,0 +1,32 @@
+name: release-please
+
+# release-please watches Conventional-Commit messages landing on
+# `master` and maintains a single, always-up-to-date release PR.
+# Merging that PR cuts a tagged release, updates CHANGELOG.md, and
+# bumps the version in `package.json`, `package-lock.json`,
+# `src-tauri/tauri.conf.json`, and `src-tauri/Cargo.toml`.
+#
+# Trade-off documented in `docs/adr/0001-conventional-commits-and-release-please.md`:
+# the bot-pushed release-please branch is **not** GPG-signed. Branch
+# protection on master requires signed commits, so the release PR
+# needs to be force-pushed (or amended) from a developer machine to
+# add a signed tip commit before it can be merged. The ADR explains
+# the procedure; this workflow only produces the unsigned candidate
+# branch.
+
+on:
+  push:
+    branches: [master]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v4
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json

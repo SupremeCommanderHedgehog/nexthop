@@ -1,0 +1,26 @@
+name: commitlint
+
+# Enforce Conventional Commits on every commit landing through a PR.
+# The rules live in `.commitlintrc.json`; this workflow only wires
+# them into CI via wagoid/commitlint-github-action, which lints each
+# commit between the PR base and head.
+#
+# Subject case + body/footer line-length rules are relaxed in the
+# config because we prefer wrapped-prose commit bodies and free-form
+# subject capitalization. The structural rules (type, scope shape,
+# breaking-change marker) remain enforced.
+
+on:
+  pull_request:
+    branches: [master]
+
+jobs:
+  commitlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: wagoid/commitlint-github-action@v6
+        with:
+          configFile: .commitlintrc.json

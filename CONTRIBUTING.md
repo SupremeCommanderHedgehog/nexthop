@@ -79,10 +79,15 @@ contributors can ignore it entirely.
   `chore/<slug>`.
 - Keep each commit focused. Rebase to clean up WIP commits before
   opening the PR.
-- Commit message style: short imperative subject (≤ 72 chars), blank
-  line, then a body explaining *why*. Conventional Commits adoption is
-  under discussion — see issue
-  [#34](https://github.com/SupremeCommanderHedgehog/nexthop/issues/34).
+- Commit message style: [Conventional Commits](https://www.conventionalcommits.org/).
+  Subject is `<type>(<scope>): <summary>`, where `<type>` is one of
+  `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`,
+  `build`, `ci`, or `chore`. Body is free-form wrapped prose
+  explaining *why*. Breaking changes use `!` after the type
+  (e.g. `feat!:`) or a `BREAKING CHANGE:` footer.
+  Rationale and trade-offs live in
+  [ADR 0001](docs/adr/0001-conventional-commits-and-release-please.md);
+  CI enforces the structural rules via `commitlint`.
 - If your change closes a GitHub issue, add a `Closes #N` trailer.
 
 ## Signed commits required

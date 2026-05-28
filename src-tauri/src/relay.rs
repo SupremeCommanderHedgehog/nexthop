@@ -630,6 +630,7 @@ impl Relay {
         if let Some(port) = self.config.general.health_port {
             task_handles.push(spawn_health_server(
                 port,
+                self.config.general.health_bind_addr.clone(),
                 Arc::clone(&self.live_stats),
                 self.shutdown_rx.clone(),
             ));
@@ -782,47 +783,111 @@ fn spawn_config_watcher(
 //  Health / readiness HTTP server
 // ════════════════════════════════════════════════════════════════════
 
+/// Resolve the bind addresses for the health server from the optional
+/// `general.health_bind_addr` config. Returns `0.0.0.0` + `::` (one
+/// each) when unset, or a single specific address when set. Validation
+/// of the address string happens in `RelayConfig::validate`, but we
+/// guard again here in case this is invoked from a hand-built config.
+fn resolve_health_bind_addrs(port: u16, configured: Option<&str>) -> Vec<SocketAddr> {
+    match configured {
+        Some(s) => match s.parse::<std::net::IpAddr>() {
+            Ok(ip) => vec![SocketAddr::new(ip, port)],
+            Err(e) => {
+                warn!(addr = %s, error = %e, "invalid health_bind_addr; falling back to dual-stack default");
+                vec![
+                    SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), port),
+                    SocketAddr::new(std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED), port),
+                ]
+            }
+        },
+        None => vec![
+            SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), port),
+            SocketAddr::new(std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED), port),
+        ],
+    }
+}
+
+/// Bind a single health-server listener. For IPv6 we explicitly set
+/// `IPV6_V6ONLY=true` so the dual-stack default (binding both `0.0.0.0`
+/// and `::`) never conflicts at the kernel level and so an explicit
+/// `::` config means IPv6-only rather than the platform-dependent
+/// v4-mapped behaviour.
+async fn bind_health_listener(addr: SocketAddr) -> std::io::Result<tokio::net::TcpListener> {
+    match addr {
+        SocketAddr::V4(_) => tokio::net::TcpListener::bind(addr).await,
+        SocketAddr::V6(_) => {
+            use socket2::{Domain, Protocol, Socket, Type};
+            let socket = Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP))?;
+            socket.set_only_v6(true)?;
+            socket.set_nonblocking(true)?;
+            socket.bind(&addr.into())?;
+            socket.listen(1024)?;
+            tokio::net::TcpListener::from_std(socket.into())
+        }
+    }
+}
+
 fn spawn_health_server(
     port: u16,
+    bind_addr: Option<String>,
     live_stats: LiveStats,
-    mut shutdown: watch::Receiver<bool>,
+    shutdown: watch::Receiver<bool>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let addr: SocketAddr = ([0, 0, 0, 0], port).into();
-        let listener = match tokio::net::TcpListener::bind(addr).await {
-            Ok(l) => l,
-            Err(e) => {
-                warn!(port = port, error = %e, "health server failed to bind");
-                return;
-            }
-        };
-        info!(
-            port = port,
-            "health server listening — GET /health  GET /stats  GET /metrics"
-        );
+        let bind_addrs = resolve_health_bind_addrs(port, bind_addr.as_deref());
         let sem = Arc::new(tokio::sync::Semaphore::new(32));
+        let mut subtasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
-        loop {
-            tokio::select! {
-                accept = listener.accept() => {
-                    match accept {
-                        Ok((stream, _)) => {
-                            match Arc::clone(&sem).try_acquire_owned() {
-                                Ok(permit) => {
-                                    let stats = Arc::clone(&live_stats);
-                                    tokio::spawn(async move {
-                                        handle_health_request(stream, stats).await;
-                                        drop(permit);
-                                    });
+        for addr in bind_addrs {
+            let listener = match bind_health_listener(addr).await {
+                Ok(l) => l,
+                Err(e) => {
+                    warn!(addr = %addr, error = %e, "health server failed to bind");
+                    continue;
+                }
+            };
+            info!(
+                addr = %addr,
+                "health server listening — GET /health  GET /stats  GET /metrics"
+            );
+
+            let sem = Arc::clone(&sem);
+            let live_stats = Arc::clone(&live_stats);
+            let mut sd = shutdown.clone();
+            subtasks.push(tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        accept = listener.accept() => {
+                            match accept {
+                                Ok((stream, _)) => {
+                                    match Arc::clone(&sem).try_acquire_owned() {
+                                        Ok(permit) => {
+                                            let stats = Arc::clone(&live_stats);
+                                            tokio::spawn(async move {
+                                                handle_health_request(stream, stats).await;
+                                                drop(permit);
+                                            });
+                                        }
+                                        Err(_) => warn!(
+                                            "health server: connection limit reached, dropping"
+                                        ),
+                                    }
                                 }
-                                Err(_) => warn!("health server: connection limit reached, dropping"),
+                                Err(e) => warn!(error = %e, "health server accept error"),
                             }
                         }
-                        Err(e) => warn!(error = %e, "health server accept error"),
+                        _ = sd.changed() => return,
                     }
                 }
-                _ = shutdown.changed() => return,
-            }
+            }));
+        }
+
+        if subtasks.is_empty() {
+            warn!("health server: no successful binds, not serving");
+            return;
+        }
+        for t in subtasks {
+            let _ = t.await;
         }
     })
 }
@@ -2021,6 +2086,136 @@ address  = "127.0.0.1:0"
         server.await.unwrap();
 
         assert!(response.contains("404"), "got: {response}");
+    }
+
+    // ── Health server bind / dual-stack coverage ──────────────────
+
+    fn ephemeral_port() -> u16 {
+        let sock = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
+        let port = sock.local_addr().expect("local_addr").port();
+        drop(sock);
+        port
+    }
+
+    async fn http_get_status_line(addr: &str) -> std::io::Result<String> {
+        let mut s = tokio::net::TcpStream::connect(addr).await?;
+        s.write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await?;
+        let mut buf = String::new();
+        tokio::io::AsyncReadExt::read_to_string(&mut s, &mut buf).await?;
+        Ok(buf)
+    }
+
+    #[test]
+    fn resolve_health_bind_addrs_default_is_dual_stack() {
+        let addrs = resolve_health_bind_addrs(9090, None);
+        assert_eq!(addrs.len(), 2);
+        assert!(addrs.iter().any(|a| a.is_ipv4() && a.port() == 9090));
+        assert!(addrs.iter().any(|a| a.is_ipv6() && a.port() == 9090));
+    }
+
+    #[test]
+    fn resolve_health_bind_addrs_explicit_v4_only() {
+        let addrs = resolve_health_bind_addrs(9090, Some("127.0.0.1"));
+        assert_eq!(addrs.len(), 1);
+        assert!(addrs[0].is_ipv4());
+        assert_eq!(addrs[0].port(), 9090);
+    }
+
+    #[test]
+    fn resolve_health_bind_addrs_explicit_v6_only() {
+        let addrs = resolve_health_bind_addrs(9090, Some("::1"));
+        assert_eq!(addrs.len(), 1);
+        assert!(addrs[0].is_ipv6());
+        assert_eq!(addrs[0].port(), 9090);
+    }
+
+    #[test]
+    fn resolve_health_bind_addrs_invalid_falls_back_to_dual_stack() {
+        // Garbage input should not panic and should still leave the server
+        // reachable on something (the dual-stack default).
+        let addrs = resolve_health_bind_addrs(9090, Some("not-an-ip"));
+        assert_eq!(addrs.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn health_server_dual_stack_binds_both_v4_and_v6() {
+        let port = ephemeral_port();
+        let stats = wrap_stats(vec![Arc::new(Stats::new("source(test)", "", ""))]);
+        let (sd_tx, sd_rx) = watch::channel(false);
+
+        let handle = spawn_health_server(port, None, stats, sd_rx);
+        // Give the bind tasks a moment to install both listeners.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let v4 = http_get_status_line(&format!("127.0.0.1:{port}"))
+            .await
+            .expect("v4 connect");
+        assert!(v4.contains("200 OK"), "v4 response: {v4}");
+
+        let v6 = http_get_status_line(&format!("[::1]:{port}"))
+            .await
+            .expect("v6 connect");
+        assert!(v6.contains("200 OK"), "v6 response: {v6}");
+
+        sd_tx.send(true).unwrap();
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+    }
+
+    #[tokio::test]
+    async fn health_server_ipv4_only_when_configured() {
+        let port = ephemeral_port();
+        let stats = wrap_stats(vec![Arc::new(Stats::new("source(test)", "", ""))]);
+        let (sd_tx, sd_rx) = watch::channel(false);
+
+        let handle = spawn_health_server(port, Some("127.0.0.1".to_string()), stats, sd_rx);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let v4 = http_get_status_line(&format!("127.0.0.1:{port}"))
+            .await
+            .expect("v4 connect");
+        assert!(v4.contains("200 OK"), "v4 response: {v4}");
+
+        let v6_result = tokio::time::timeout(
+            Duration::from_millis(400),
+            http_get_status_line(&format!("[::1]:{port}")),
+        )
+        .await;
+        assert!(
+            matches!(v6_result, Ok(Err(_)) | Err(_)),
+            "v6 connect should fail or time out, got: {v6_result:?}"
+        );
+
+        sd_tx.send(true).unwrap();
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+    }
+
+    #[tokio::test]
+    async fn health_server_ipv6_only_when_configured() {
+        let port = ephemeral_port();
+        let stats = wrap_stats(vec![Arc::new(Stats::new("source(test)", "", ""))]);
+        let (sd_tx, sd_rx) = watch::channel(false);
+
+        let handle = spawn_health_server(port, Some("::1".to_string()), stats, sd_rx);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let v6 = http_get_status_line(&format!("[::1]:{port}"))
+            .await
+            .expect("v6 connect");
+        assert!(v6.contains("200 OK"), "v6 response: {v6}");
+
+        let v4_result = tokio::time::timeout(
+            Duration::from_millis(400),
+            http_get_status_line(&format!("127.0.0.1:{port}")),
+        )
+        .await;
+        assert!(
+            matches!(v4_result, Ok(Err(_)) | Err(_)),
+            "v4 connect should fail or time out, got: {v4_result:?}"
+        );
+
+        sd_tx.send(true).unwrap();
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
     }
 
     // ── Additional coverage ────────────────────────────────────────────

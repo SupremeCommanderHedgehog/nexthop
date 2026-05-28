@@ -240,16 +240,20 @@ else logs a targeted warning naming what needs a restart.
 | `[rate_limit]` (whole section, including removal) | Applied on the next packet. |
 | `general.log_level` | Filter is swapped on the underlying `tracing` subscriber; new lines respect the new level immediately. Headless mode only — the GUI uses a fixed subscriber. |
 | `general.stats_interval_secs` | Each reporter re-reads the value on its next tick. A change applied mid-tick takes effect on the following cycle. |
-| `[[destinations]]` `overflow_policy` | Read by the source fan-out per packet, so the next packet observes the new policy. Only applies when the destination at the same index has the same identity (protocol, mode, address, cast_mode). |
-| `[[destinations]]` `reconnect_delay_ms` | Read by the destination task on each reconnect attempt; takes effect on the next reconnect, not mid-sleep. Same identity-match constraint as `overflow_policy`. |
+| `[[destinations]]` `overflow_policy` | Read by the source fan-out per packet, so the next packet observes the new policy. |
+| `[[destinations]]` `reconnect_delay_ms` | Read by the destination task on each reconnect attempt; takes effect on the next reconnect, not mid-sleep. |
+| Adding a `[[destinations]]` entry | New destination task spawns and joins the fan-out atomically; existing destinations keep running. |
+| Removing a `[[destinations]]` entry | Source stops fanning out to it immediately; the destination task receives a per-task shutdown and drains in-flight messages (up to 5 s). Other destinations are unaffected. |
+| Changing a `[[destinations]]` identity field (`protocol`, `mode`, `address`, `cast_mode`, `multicast_*`) | Treated as a remove of the old destination plus an add of the new one. |
+| `[[destinations]]` `name` | Cosmetic only; new log lines use the new name on next emission. |
+
+Identity for matching across reloads is `(protocol, mode, address, cast_mode, multicast_interface, multicast_interface_index)`. Two entries with the same identity are matched and updated in place; otherwise the old is removed and the new is added.
 
 ### Restart required
 
 | Field | Why |
 |-------|-----|
 | `[source]` (any field) | Would force-drop in-flight source connections and re-bind the listening socket. |
-| Adding, removing, or relocating `[[destinations]]` | Spawning or stopping destination tasks needs a supervisor (planned). For now, the relay logs a warning and keeps running the previous destination set. |
-| Per-destination changes beyond `overflow_policy` / `reconnect_delay_ms` (e.g. multicast settings, name) | Same supervisor-refactor blocker. |
 | `general.channel_capacity` | Baked into the bounded `mpsc::channel` at construction; would need to recreate every per-destination queue and drain in-flight messages. |
 | `general.max_payload_size` | Used by source read loops to size buffers and validate payloads — a mid-flight change would skew accounting. |
 | `general.health_port` | Bound once at startup; changing the port means listening on a different address, which restart handles cleanly. |

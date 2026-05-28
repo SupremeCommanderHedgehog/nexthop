@@ -38,7 +38,7 @@ fn sigterm_triggers_graceful_shutdown() {
         .expect("write config");
 
     let bin = env!("CARGO_BIN_EXE_nexthop");
-    let mut child = Command::new(bin)
+    let child = Command::new(bin)
         .arg("--no-gui")
         .arg("--config")
         .arg(&config_path)

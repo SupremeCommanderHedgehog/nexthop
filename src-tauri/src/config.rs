@@ -108,6 +108,12 @@ pub enum TransformConfig {
     /// Drop payloads strictly larger than `n_bytes`. Payloads of
     /// exactly `n_bytes` pass.
     DropLargerThan { n_bytes: usize },
+    /// Reverse byte order within each 16-bit word. Payloads whose
+    /// length is not a multiple of 2 are dropped.
+    ByteSwap16,
+    /// Reverse byte order within each 32-bit word. Payloads whose
+    /// length is not a multiple of 4 are dropped.
+    ByteSwap32,
 }
 
 impl std::ops::Deref for DestConfig {

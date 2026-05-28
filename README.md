@@ -21,7 +21,7 @@ for running as a service or in CI pipelines.
 - **Token-bucket rate limiting** — configurable bytes/sec cap with burst allowance
 - **Live config reload** — rate limiter updates take effect on the next packet without a restart
 - **Health endpoint** — optional HTTP `/health`, `/stats`, and Prometheus `/metrics` server for monitoring
-- **GUI + headless** — full graphical interface for interactive use; `--no_gui` for server deployments
+- **GUI + headless** — full graphical interface for interactive use; `--no-gui` for server deployments
 - **Dark / light theme**
 
 ---
@@ -78,10 +78,10 @@ you start/stop the relay. The **Monitoring** tab shows live per-endpoint statist
 ### Headless mode
 
 ```sh
-nexthop --no_gui --config /etc/relay/production.toml
+nexthop --no-gui --config /etc/relay/production.toml
 
 # JSON-structured logs for Loki / Datadog / etc.
-nexthop --no_gui --log-format json --config production.toml
+nexthop --no-gui --log-format json --config production.toml
 ```
 
 The relay starts immediately and logs to stdout. Ctrl-C triggers a graceful shutdown.
@@ -92,7 +92,7 @@ The relay starts immediately and logs to stdout. Ctrl-C triggers a graceful shut
 |------|-------|---------|-------------|
 | `--config <FILE>` | `-c` | `nexthop.toml` | Path to the TOML config file |
 | `--log-format <FORMAT>` | — | `text` | `text` or `json` |
-| `--no_gui` | — | *(GUI on)* | Run headless without opening a window |
+| `--no-gui` | — | *(GUI on)* | Run headless without opening a window |
 | `--help` | `-h` | — | Print help |
 | `--version` | `-V` | — | Print version |
 

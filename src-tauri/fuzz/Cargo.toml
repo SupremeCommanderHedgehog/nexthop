@@ -1,0 +1,42 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026-present Patrick S Connallon
+
+# Standalone fuzz crate. Not a member of the root workspace (see the
+# parent `Cargo.toml`'s `exclude` list) because libfuzzer-sys requires
+# the nightly toolchain and address-sanitizer instrumentation that
+# stable cargo cannot satisfy.
+
+[package]
+name        = "nexthop-fuzz"
+version     = "0.0.0"
+publish     = false
+edition     = "2021"
+description = "libfuzzer harnesses for the nexthop relay"
+license     = "GPL-3.0-or-later"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+bytes         = "1"
+toml          = "0.8"
+nexthop_lib   = { package = "nexthop", path = ".." }
+
+# Each target is a separate binary. `test = false`, `doc = false`, and
+# `bench = false` keep `cargo test` etc. from trying to compile them
+# under the normal harness — only `cargo fuzz run <target>` does.
+
+[[bin]]
+name             = "config_parser"
+path             = "fuzz_targets/config_parser.rs"
+test             = false
+doc              = false
+bench            = false
+
+[[bin]]
+name             = "source_read"
+path             = "fuzz_targets/source_read.rs"
+test             = false
+doc              = false
+bench            = false

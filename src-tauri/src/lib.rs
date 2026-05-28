@@ -3,8 +3,8 @@
 
 mod app_state;
 mod commands;
-mod config;
-mod error;
+pub mod config;
+pub mod error;
 mod prefs;
 mod rate_limiter;
 mod relay;

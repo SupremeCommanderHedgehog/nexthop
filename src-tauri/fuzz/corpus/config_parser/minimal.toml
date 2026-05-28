@@ -1,0 +1,9 @@
+[general]
+[source]
+protocol = "udp"
+mode = "server"
+address = "127.0.0.1:5000"
+[[destinations]]
+protocol = "udp"
+mode = "client"
+address = "127.0.0.1:5001"

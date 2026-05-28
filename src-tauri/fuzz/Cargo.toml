@@ -28,7 +28,12 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 bytes         = "1"
 toml          = "0.8"
-nexthop_lib   = { package = "nexthop", path = ".." }
+# `default-features = false` drops Tauri from the dep graph. Without
+# this the fuzz crate would pull in tauri + tauri-build + GTK/WebKit
+# bindings and require the frontend `dist/` for the compile-time
+# `tauri::generate_context!` macro, none of which the fuzz harnesses
+# use.
+nexthop_lib   = { package = "nexthop", path = "..", default-features = false }
 
 # Each target is a separate binary. `test = false`, `doc = false`, and
 # `bench = false` keep `cargo test` etc. from trying to compile them

@@ -398,16 +398,21 @@ fn escape_label(s: &str) -> String {
 }
 
 /// Periodically logs a statistics summary until shutdown.
+///
+/// The interval is read from the shared atomic on every tick so a
+/// hot-reload of `general.stats_interval_secs` takes effect on the next
+/// cycle without restarting the reporter task.
 pub async fn run_reporter(
     stats: Arc<Stats>,
-    interval: Duration,
+    interval_secs: Arc<AtomicU64>,
     mut shutdown: watch::Receiver<bool>,
 ) {
-    let mut tick = tokio::time::interval(interval);
-    tick.tick().await; // consume the immediate first tick
     loop {
+        // Guard against 0 producing a zero-duration busy loop.
+        let secs = interval_secs.load(Ordering::Relaxed).max(1);
+        let sleep = tokio::time::sleep(Duration::from_secs(secs));
         tokio::select! {
-            _ = tick.tick() => stats.log_report(),
+            _ = sleep => stats.log_report(),
             _ = shutdown.changed() => {
                 stats.log_report();
                 return;

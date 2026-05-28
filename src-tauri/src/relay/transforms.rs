@@ -8,11 +8,12 @@
 //! `dropped_validation` on the destination's stats and discarding the
 //! payload.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use bytes::{Bytes, BytesMut};
 
-use crate::config::TransformConfig;
+use crate::config::{TimestampClock, TransformConfig};
 use crate::stats::Stats;
 
 /// Outcome of one `Transform::apply` call.
@@ -45,6 +46,10 @@ pub fn build_pipeline(configs: &[TransformConfig]) -> Vec<Arc<dyn Transform>> {
             }
             TransformConfig::ByteSwap16 => Arc::new(ByteSwap16) as Arc<dyn Transform>,
             TransformConfig::ByteSwap32 => Arc::new(ByteSwap32) as Arc<dyn Transform>,
+            TransformConfig::PrependTimestamp { clock } => Arc::new(PrependTimestamp {
+                clock: *clock,
+                monotonic_start: OnceLock::new(),
+            }) as Arc<dyn Transform>,
         })
         .collect()
 }
@@ -132,6 +137,35 @@ impl Transform for ByteSwap32 {
         for chunk in payload.chunks_exact(4) {
             buf.extend_from_slice(&[chunk[3], chunk[2], chunk[1], chunk[0]]);
         }
+        Decision::Pass(buf.freeze())
+    }
+}
+
+/// Prepend an 8-byte big-endian u64 timestamp to the payload.
+///
+/// The `monotonic_start` field anchors the `MonotonicNs` clock on the
+/// first packet. The cell is empty until then so the anchor reflects
+/// the first real payload, not config-load time.
+pub struct PrependTimestamp {
+    pub clock: TimestampClock,
+    pub monotonic_start: OnceLock<Instant>,
+}
+
+impl Transform for PrependTimestamp {
+    fn apply(&self, payload: Bytes) -> Decision {
+        let ts_ns: u64 = match self.clock {
+            TimestampClock::EpochNs => match SystemTime::now().duration_since(UNIX_EPOCH) {
+                Ok(d) => d.as_nanos() as u64,
+                Err(_) => return Decision::Drop,
+            },
+            TimestampClock::MonotonicNs => {
+                let start = self.monotonic_start.get_or_init(Instant::now);
+                Instant::now().duration_since(*start).as_nanos() as u64
+            }
+        };
+        let mut buf = BytesMut::with_capacity(8 + payload.len());
+        buf.extend_from_slice(&ts_ns.to_be_bytes());
+        buf.extend_from_slice(&payload);
         Decision::Pass(buf.freeze())
     }
 }
@@ -271,5 +305,84 @@ mod tests {
         let cfgs = vec![TransformConfig::ByteSwap16, TransformConfig::ByteSwap32];
         let pipeline = build_pipeline(&cfgs);
         assert_eq!(pipeline.len(), 2);
+    }
+
+    fn read_be_u64(out: &[u8]) -> u64 {
+        u64::from_be_bytes(out[..8].try_into().expect("at least 8 bytes"))
+    }
+
+    #[test]
+    fn prepend_timestamp_epoch_ns_writes_current_epoch() {
+        let t = PrependTimestamp {
+            clock: TimestampClock::EpochNs,
+            monotonic_start: OnceLock::new(),
+        };
+        let before = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+        let payload = Bytes::from_static(b"hello");
+        let Decision::Pass(out) = t.apply(payload.clone()) else {
+            panic!("expected Pass");
+        };
+        let after = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+        let stamped = read_be_u64(&out);
+        assert!(
+            stamped >= before && stamped <= after,
+            "stamped {stamped} not in [{before}, {after}]"
+        );
+        assert_eq!(&out[8..], &payload[..]);
+    }
+
+    #[test]
+    fn prepend_timestamp_monotonic_ns_is_non_decreasing() {
+        let t = PrependTimestamp {
+            clock: TimestampClock::MonotonicNs,
+            monotonic_start: OnceLock::new(),
+        };
+        let Decision::Pass(first) = t.apply(Bytes::from_static(b"a")) else {
+            panic!("expected Pass first call");
+        };
+        let Decision::Pass(second) = t.apply(Bytes::from_static(b"b")) else {
+            panic!("expected Pass second call");
+        };
+        let t1 = read_be_u64(&first);
+        let t2 = read_be_u64(&second);
+        assert!(t2 >= t1, "monotonic timestamps decreased: {t1} -> {t2}");
+        assert_eq!(&first[8..], b"a");
+        assert_eq!(&second[8..], b"b");
+    }
+
+    #[test]
+    fn prepend_timestamp_monotonic_ns_starts_near_zero() {
+        let t = PrependTimestamp {
+            clock: TimestampClock::MonotonicNs,
+            monotonic_start: OnceLock::new(),
+        };
+        let Decision::Pass(out) = t.apply(Bytes::from_static(b"")) else {
+            panic!("expected Pass");
+        };
+        let stamped = read_be_u64(&out);
+        // First-use anchor + immediate read; expect well under a second.
+        assert!(
+            stamped < 1_000_000_000,
+            "first monotonic stamp should be near zero, got {stamped}"
+        );
+    }
+
+    #[test]
+    fn build_pipeline_constructs_prepend_timestamp() {
+        let cfgs = vec![TransformConfig::PrependTimestamp {
+            clock: TimestampClock::EpochNs,
+        }];
+        let pipeline = build_pipeline(&cfgs);
+        assert_eq!(pipeline.len(), 1);
+        let stats = Stats::new("test", "", "");
+        let out = apply_pipeline(&pipeline, &stats, Bytes::from_static(b"abc")).expect("Pass");
+        assert_eq!(out.len(), 11); // 8-byte prefix + 3-byte payload
+        assert_eq!(&out[8..], b"abc");
     }
 }

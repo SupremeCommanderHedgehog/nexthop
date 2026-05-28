@@ -80,6 +80,11 @@ pub struct DestSpec {
     pub endpoint: EndpointSpec,
     pub overflow_policy: Option<&'static str>, // None → drop_newest default
     pub rate_limit: Option<(u64, u64)>,        // bytes_per_second, burst
+    pub transforms: Vec<TransformSpec>,
+}
+
+pub enum TransformSpec {
+    DropSmallerThan { n_bytes: usize },
 }
 
 impl DestSpec {
@@ -88,6 +93,7 @@ impl DestSpec {
             endpoint,
             overflow_policy: None,
             rate_limit: None,
+            transforms: Vec::new(),
         }
     }
     pub fn with_overflow(mut self, policy: &'static str) -> Self {
@@ -96,6 +102,11 @@ impl DestSpec {
     }
     pub fn with_rate_limit(mut self, bps: u64, burst: u64) -> Self {
         self.rate_limit = Some((bps, burst));
+        self
+    }
+    pub fn with_drop_smaller_than(mut self, n_bytes: usize) -> Self {
+        self.transforms
+            .push(TransformSpec::DropSmallerThan { n_bytes });
         self
     }
 }
@@ -165,6 +176,15 @@ address = "{}"
             out.push_str(&format!(
                 "rate_limit = {{ bytes_per_second = {bps}, burst_size = {burst} }}\n"
             ));
+        }
+        for t in &d.transforms {
+            match t {
+                TransformSpec::DropSmallerThan { n_bytes } => {
+                    out.push_str(&format!(
+                        "\n[[destinations.transforms]]\ntype = \"drop_smaller_than\"\nn_bytes = {n_bytes}\n"
+                    ));
+                }
+            }
         }
     }
 

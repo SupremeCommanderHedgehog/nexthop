@@ -52,6 +52,7 @@ fn default_config() -> RelayConfig {
             },
             overflow_policy: OverflowPolicy::DropNewest,
             rate_limit: None,
+            transforms: Vec::new(),
         }],
     }
 }

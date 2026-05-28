@@ -7,6 +7,8 @@
 
 //! Relay engine: wires sources to destinations via per-destination mpsc channels.
 
+mod transforms;
+
 use crate::config::*;
 use crate::error::Result;
 use crate::rate_limiter::RateLimiter;
@@ -23,6 +25,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, watch, Mutex};
 use tracing::{debug, error, info, warn};
+use transforms::{apply_pipeline, build_pipeline, Transform};
 
 // ════════════════════════════════════════════════════════════════════
 //  Destination identity
@@ -36,6 +39,9 @@ use tracing::{debug, error, info, warn};
 /// Identity intentionally excludes mutable / cosmetic fields
 /// (`overflow_policy`, `reconnect_delay_ms`, `name`) so changes there
 /// take the in-place live-update path rather than respawning the task.
+/// Transforms are included because the pipeline is built once at spawn
+/// (see ADR 0002 / `relay::transforms`); changing them therefore takes
+/// the same remove-and-add path as changing the address.
 #[derive(Clone, Debug, Hash, Eq, PartialEq)]
 pub struct DestKey {
     pub protocol: Protocol,
@@ -44,6 +50,7 @@ pub struct DestKey {
     pub cast_mode: CastMode,
     pub multicast_interface: Option<String>,
     pub multicast_interface_index: Option<u32>,
+    pub transforms: Vec<TransformConfig>,
 }
 
 impl DestKey {
@@ -55,6 +62,7 @@ impl DestKey {
             cast_mode: cfg.cast_mode,
             multicast_interface: cfg.multicast_interface.clone(),
             multicast_interface_index: cfg.multicast_interface_index,
+            transforms: cfg.transforms.clone(),
         }
     }
 }
@@ -277,6 +285,8 @@ impl DestSupervisor {
 
         let (tx, rx) = mpsc::channel::<Bytes>(self.channel_capacity);
 
+        let pipeline = build_pipeline(&cfg.transforms);
+
         let name = cfg.display_name();
         let cap = self.channel_capacity;
         let runtime_for_task = Arc::clone(&runtime);
@@ -285,6 +295,7 @@ impl DestSupervisor {
         let global_shutdown_for_reporter = self.global_shutdown_rx.clone();
         let global_limiter_for_task = Arc::clone(&self.global_limiter);
         let cfg_for_task = cfg.clone();
+        let pipeline_for_task = pipeline.clone();
 
         // Spawn the periodic stats reporter for this dest. It exits when
         // the global shutdown fires; we don't tie it to per-dest shutdown
@@ -295,7 +306,7 @@ impl DestSupervisor {
             global_shutdown_for_reporter,
         ));
 
-        info!(dest = %name, proto = ?cfg.protocol, mode = ?cfg.mode, "destination starting");
+        info!(dest = %name, proto = ?cfg.protocol, mode = ?cfg.mode, transforms = pipeline.len(), "destination starting");
         let task = tokio::spawn(async move {
             if let Err(e) = run_destination(
                 cfg_for_task,
@@ -305,6 +316,7 @@ impl DestSupervisor {
                 stats_for_task.clone(),
                 combined_shutdown_rx,
                 cap,
+                pipeline_for_task,
             )
             .await
             {
@@ -1315,6 +1327,7 @@ async fn source_udp(
 //  Destination
 // ════════════════════════════════════════════════════════════════════
 
+#[allow(clippy::too_many_arguments)]
 async fn run_destination(
     cfg: DestConfig,
     runtime: Arc<DestRuntime>,
@@ -1323,10 +1336,11 @@ async fn run_destination(
     stats: Arc<Stats>,
     shutdown: watch::Receiver<bool>,
     channel_cap: usize,
+    pipeline: Vec<Arc<dyn Transform>>,
 ) -> Result<()> {
     match (cfg.protocol, cfg.mode) {
         (Protocol::Tcp, EndpointMode::Client) => {
-            dest_tcp_client(cfg, runtime, global_limiter, rx, stats, shutdown).await
+            dest_tcp_client(cfg, runtime, global_limiter, rx, stats, shutdown, pipeline).await
         }
         (Protocol::Tcp, EndpointMode::Server) => {
             dest_tcp_server(
@@ -1337,14 +1351,15 @@ async fn run_destination(
                 stats,
                 shutdown,
                 channel_cap,
+                pipeline,
             )
             .await
         }
         (Protocol::Udp, EndpointMode::Client) => {
-            dest_udp_client(cfg, runtime, global_limiter, rx, stats, shutdown).await
+            dest_udp_client(cfg, runtime, global_limiter, rx, stats, shutdown, pipeline).await
         }
         (Protocol::Udp, EndpointMode::Server) => {
-            dest_udp_server(cfg, runtime, global_limiter, rx, stats, shutdown).await
+            dest_udp_server(cfg, runtime, global_limiter, rx, stats, shutdown, pipeline).await
         }
     }
 }
@@ -1366,6 +1381,7 @@ async fn dest_tcp_client(
     mut rx: mpsc::Receiver<Bytes>,
     stats: Arc<Stats>,
     mut shutdown: watch::Receiver<bool>,
+    pipeline: Vec<Arc<dyn Transform>>,
 ) -> Result<()> {
     let addr = cfg.socket_addr()?;
     let name = cfg.display_name();
@@ -1381,6 +1397,9 @@ async fn dest_tcp_client(
                     tokio::select! {
                         msg = rx.recv() => match msg {
                             Some(data) => {
+                                let Some(data) = apply_pipeline(&pipeline, &stats, data) else {
+                                    continue;
+                                };
                                 acquire_dest_tokens(&runtime, &global_limiter, data.len() as u64).await;
                                 if let Err(e) = stream.write_all(&data).await {
                                     break Some(e.to_string());
@@ -1421,6 +1440,7 @@ async fn dest_tcp_client(
 
 // ── TCP destination: server (listen, fan-out to connected peers) ───
 
+#[allow(clippy::too_many_arguments)]
 async fn dest_tcp_server(
     cfg: DestConfig,
     runtime: Arc<DestRuntime>,
@@ -1429,6 +1449,7 @@ async fn dest_tcp_server(
     stats: Arc<Stats>,
     mut shutdown: watch::Receiver<bool>,
     channel_cap: usize,
+    pipeline: Vec<Arc<dyn Transform>>,
 ) -> Result<()> {
     let addr = cfg.socket_addr()?;
     let name = cfg.display_name();
@@ -1483,6 +1504,9 @@ async fn dest_tcp_server(
             msg = rx.recv() => {
                 match msg {
                     Some(data) => {
+                        let Some(data) = apply_pipeline(&pipeline, &stats, data) else {
+                            continue;
+                        };
                         // Acquire once per destination packet: a TCP-server dest's
                         // limit is its aggregate egress to all connected peers, not
                         // per-peer (otherwise N peers would multiply throughput).
@@ -1557,6 +1581,7 @@ async fn dest_udp_client(
     mut rx: mpsc::Receiver<Bytes>,
     stats: Arc<Stats>,
     mut shutdown: watch::Receiver<bool>,
+    pipeline: Vec<Arc<dyn Transform>>,
 ) -> Result<()> {
     let addr = cfg.socket_addr()?;
     let name = cfg.display_name();
@@ -1571,6 +1596,9 @@ async fn dest_udp_client(
             msg = rx.recv() => {
                 match msg {
                     Some(data) => {
+                        let Some(data) = apply_pipeline(&pipeline, &stats, data) else {
+                            continue;
+                        };
                         acquire_dest_tokens(&runtime, &global_limiter, data.len() as u64).await;
                         match socket.send_to(&data, addr).await {
                             Ok(n) => {
@@ -1893,6 +1921,7 @@ address  = "127.0.0.1:0"
             },
             overflow_policy: OverflowPolicy::DropNewest,
             rate_limit: None,
+            transforms: Vec::new(),
         });
 
         let ctx = test_ctx_for(&old).await;
@@ -2024,6 +2053,7 @@ address  = "127.0.0.1:0"
             },
             overflow_policy: OverflowPolicy::DropNewest,
             rate_limit: None,
+            transforms: Vec::new(),
         });
         let mut new = old.clone();
         let removed_key = DestKey::from_cfg(&old.destinations[1]);
@@ -2055,6 +2085,7 @@ address  = "127.0.0.1:0"
             },
             overflow_policy: OverflowPolicy::DropNewest,
             rate_limit: None,
+            transforms: Vec::new(),
         }
     }
 
@@ -2620,6 +2651,7 @@ async fn dest_udp_server(
     rx: mpsc::Receiver<Bytes>,
     stats: Arc<Stats>,
     mut shutdown: watch::Receiver<bool>,
+    pipeline: Vec<Arc<dyn Transform>>,
 ) -> Result<()> {
     let addr = cfg.socket_addr()?;
     let name = cfg.display_name();
@@ -2668,6 +2700,9 @@ async fn dest_udp_server(
             msg = rx.recv() => {
                 match msg {
                     Some(data) => {
+                        let Some(data) = apply_pipeline(&pipeline, &stats, data) else {
+                            continue;
+                        };
                         // Same model as dest_tcp_server: acquire once per
                         // destination packet, not per peer, so the configured
                         // rate is the dest's aggregate egress.

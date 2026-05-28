@@ -87,6 +87,24 @@ pub struct DestConfig {
     /// precedence rules.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rate_limit: Option<RateLimitConfig>,
+    /// Optional ordered list of per-destination payload transforms. See
+    /// `MANUAL.md` "Transforms" and ADR 0002. Transforms run on each
+    /// payload after the source fan-out and before rate-limit
+    /// acquisition; the pipeline is rebuilt (destination respawned)
+    /// whenever this list changes across hot-reloads.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transforms: Vec<TransformConfig>,
+}
+
+/// One stage of a destination's transform pipeline. The `type` tag
+/// selects the transform; remaining fields are transform-specific.
+/// See ADR 0002.
+#[derive(Debug, Clone, Hash, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TransformConfig {
+    /// Drop payloads strictly smaller than `n_bytes`. Payloads of
+    /// exactly `n_bytes` pass.
+    DropSmallerThan { n_bytes: usize },
 }
 
 impl std::ops::Deref for DestConfig {
@@ -1138,6 +1156,7 @@ address  = "127.0.0.1:20000"
                 base,
                 overflow_policy,
                 rate_limit,
+                transforms: Vec::new(),
             })
     }
 

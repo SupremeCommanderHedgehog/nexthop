@@ -62,8 +62,13 @@ jobs:
         with:
           workspaces: "src-tauri/fuzz -> target"
 
-      - name: Install cargo-fuzz
-        run: cargo install --locked cargo-fuzz
+      # Use the prebuilt cargo-fuzz binary. `cargo install --locked
+      # cargo-fuzz` pins old `rustix 0.36.x`, which uses perma-unstable
+      # rustc attributes that current nightly rejects. taiki-e's install
+      # action pulls a release binary and skips the compile entirely.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
 
       - name: Run fuzz target ${{ matrix.target }} for ${{ steps.duration.outputs.seconds }}s
         working-directory: src-tauri/fuzz

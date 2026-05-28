@@ -117,6 +117,24 @@ pub enum TransformConfig {
     /// Prepend an 8-byte big-endian u64 timestamp to the payload.
     /// `clock` selects which clock source the timestamp is read from.
     PrependTimestamp { clock: TimestampClock },
+    /// Match the payload against a byte regex; drop based on `action`.
+    /// The pattern is compiled once at config-load time; a malformed
+    /// pattern is rejected by [`RelayConfig::validate`] before any
+    /// runtime tasks spawn.
+    RegexFilter {
+        pattern: String,
+        action: RegexAction,
+    },
+}
+
+/// Outcome selector for [`TransformConfig::RegexFilter`].
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RegexAction {
+    /// Drop payloads whose bytes match the pattern.
+    DropMatch,
+    /// Drop payloads whose bytes do not match the pattern.
+    DropNonMatch,
 }
 
 /// Clock source for [`TransformConfig::PrependTimestamp`].
@@ -253,6 +271,15 @@ impl RelayConfig {
                     return Err(RelayError::Config(format!(
                         "destination[{i}]: rate_limit.bytes_per_second must be > 0"
                     )));
+                }
+            }
+            for (j, t) in d.transforms.iter().enumerate() {
+                if let TransformConfig::RegexFilter { pattern, .. } = t {
+                    regex::bytes::Regex::new(pattern).map_err(|e| {
+                        RelayError::Config(format!(
+                            "destination[{i}].transforms[{j}]: regex_filter pattern '{pattern}' failed to compile: {e}"
+                        ))
+                    })?;
                 }
             }
         }
@@ -674,6 +701,57 @@ multicast_interface = "eth0"
     #[test]
     fn from_file_missing_returns_error() {
         assert!(RelayConfig::from_file("/nonexistent/path/nexthop_test.toml").is_err());
+    }
+
+    #[test]
+    fn reject_invalid_regex_filter_pattern() {
+        let raw = r#"
+[general]
+[source]
+protocol = "udp"
+mode = "server"
+address = "0.0.0.0:10000"
+[[destinations]]
+protocol = "udp"
+mode = "client"
+address = "127.0.0.1:20000"
+
+[[destinations.transforms]]
+type = "regex_filter"
+pattern = "[unclosed"
+action = "drop_match"
+"#;
+        let cfg: RelayConfig = toml::from_str(raw).unwrap();
+        let err = cfg
+            .validate()
+            .expect_err("malformed regex should fail validation");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("regex_filter") && msg.contains("[unclosed"),
+            "error should name the offending pattern: {msg}"
+        );
+    }
+
+    #[test]
+    fn accept_valid_regex_filter_pattern() {
+        let raw = r#"
+[general]
+[source]
+protocol = "udp"
+mode = "server"
+address = "0.0.0.0:10000"
+[[destinations]]
+protocol = "udp"
+mode = "client"
+address = "127.0.0.1:20000"
+
+[[destinations.transforms]]
+type = "regex_filter"
+pattern = "^heartbeat:"
+action = "drop_match"
+"#;
+        let cfg: RelayConfig = toml::from_str(raw).unwrap();
+        cfg.validate().expect("valid regex should pass validation");
     }
 
     #[test]

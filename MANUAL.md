@@ -373,6 +373,35 @@ The transform always allocates a new `Bytes` of length
 `8 + payload.len()` — it cannot avoid the allocation since the
 payload is growing.
 
+### `regex_filter`
+
+Match the payload bytes against a regex; drop based on `action`. The
+matching itself is allocation-free.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `pattern` | string | yes | A `regex` crate **bytes** pattern (not PCRE). See the [`regex` syntax reference](https://docs.rs/regex/latest/regex/#syntax). |
+| `action` | string | yes | `"drop_match"` to drop matching payloads, or `"drop_non_match"` to drop everything else. |
+
+```toml
+[[destinations.transforms]]
+type    = "regex_filter"
+pattern = "^heartbeat:"
+action  = "drop_match"
+```
+
+The pattern is compiled once at **config-load time**: a malformed
+pattern is rejected by config validation before any runtime tasks
+spawn (the error names the destination, the transform index, and the
+offending pattern). It can never panic at runtime.
+
+By default the pattern matches as Unicode. Use the `(?-u)` mode flag
+to match raw bytes instead — e.g. `(?-u)\xff\xfe` matches the
+literal byte sequence `[0xff, 0xfe]` rather than the Unicode code
+points `U+00FF U+00FE`.
+
+Drops count against `dropped_validation`.
+
 ---
 
 ## Rate limiting

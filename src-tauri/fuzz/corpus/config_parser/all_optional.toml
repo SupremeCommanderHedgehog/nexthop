@@ -1,0 +1,33 @@
+[general]
+log_level = "debug"
+stats_interval_secs = 5
+channel_capacity = 256
+max_payload_size = 1500
+health_port = 9090
+health_bind_addr = "127.0.0.1"
+
+[source]
+name = "ingest"
+protocol = "tcp"
+mode = "server"
+address = "0.0.0.0:10000"
+reconnect_delay_ms = 1000
+
+[rate_limit]
+bytes_per_second = 1048576
+burst_size = 16384
+
+[[destinations]]
+name = "primary"
+protocol = "tcp"
+mode = "client"
+address = "127.0.0.1:20000"
+overflow_policy = "block"
+reconnect_delay_ms = 500
+rate_limit = { bytes_per_second = 524288, burst_size = 8192 }
+
+[[destinations]]
+name = "mirror"
+protocol = "udp"
+mode = "client"
+address = "127.0.0.1:20001"

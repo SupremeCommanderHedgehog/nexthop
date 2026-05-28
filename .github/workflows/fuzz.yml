@@ -1,0 +1,85 @@
+name: Fuzz
+
+# Fuzz harnesses run on:
+#   - every push to master — a short 5-minute smoke per target,
+#   - a nightly cron — a longer 30-minute soak per target,
+#   - manual dispatch with a configurable duration.
+#
+# They are intentionally OUT of the required-status set checked on PRs:
+# fuzz time is non-deterministic and a fresh crash should not block a
+# merge. New crashes become tracked issues / regression test cases.
+#
+# cargo-fuzz needs nightly Rust + libfuzzer-sys, so this workflow runs
+# Linux-only (libfuzzer also works on macOS but Windows support is
+# patchy and our target audience runs on Linux/macOS).
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "src-tauri/src/**"
+      - "src-tauri/fuzz/**"
+      - "src-tauri/Cargo.toml"
+      - ".github/workflows/fuzz.yml"
+  schedule:
+    # 04:17 UTC every day — off-peak for both US and EU CI runners.
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+    inputs:
+      duration_seconds:
+        description: "Per-target run duration (seconds)"
+        required: false
+        default: "300"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz:
+    name: cargo fuzz (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [config_parser, source_read]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pick run duration
+        id: duration
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "seconds=1800" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "seconds=${{ github.event.inputs.duration_seconds }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "seconds=300" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: dtolnay/rust-toolchain@nightly
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri/fuzz -> target"
+
+      - name: Install cargo-fuzz
+        run: cargo install --locked cargo-fuzz
+
+      - name: Run fuzz target ${{ matrix.target }} for ${{ steps.duration.outputs.seconds }}s
+        working-directory: src-tauri/fuzz
+        run: |
+          cargo fuzz run ${{ matrix.target }} -- \
+            -max_total_time=${{ steps.duration.outputs.seconds }} \
+            -print_final_stats=1
+
+      # When libfuzzer finds a panic / UB it writes the crashing input
+      # under `fuzz/artifacts/<target>/`. Uploading those as a workflow
+      # artifact (only on failure) makes the reproducer immediately
+      # downloadable for triage without re-running the fuzzer.
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes-${{ matrix.target }}
+          path: src-tauri/fuzz/artifacts/${{ matrix.target }}/
+          if-no-files-found: ignore

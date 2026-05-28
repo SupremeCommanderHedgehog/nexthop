@@ -45,6 +45,34 @@ npm test
 
 CI runs the same checks; PRs with red CI will not be reviewed.
 
+## Fuzzing
+
+The repo ships two libfuzzer harnesses under `src-tauri/fuzz/`:
+
+- `config_parser` — feeds arbitrary bytes through `toml::from_str` →
+  `RelayConfig::validate`, the highest panic-risk surface in the crate.
+- `source_read` — exercises the UDP source's framing + oversize-drop
+  arithmetic against arbitrary byte streams.
+
+The dedicated [`Fuzz` workflow](.github/workflows/fuzz.yml) runs both
+targets on every push to `master` (5 minutes each) and on a nightly
+cron (30 minutes each). Crashes are uploaded as workflow artifacts.
+
+Running locally requires nightly Rust and `cargo-fuzz`, and works on
+Linux and macOS (libfuzzer's Windows support is patchy):
+
+```sh
+rustup install nightly
+cargo install --locked cargo-fuzz
+cd src-tauri/fuzz
+cargo +nightly fuzz run config_parser
+cargo +nightly fuzz run source_read
+```
+
+The fuzz crate is excluded from the main workspace, so it does not
+affect `cargo build` / `cargo test` from the repo root and Windows
+contributors can ignore it entirely.
+
 ## Branches and commits
 
 - Branch off `master`. Name branches `feature/<slug>`, `fix/<slug>`, or

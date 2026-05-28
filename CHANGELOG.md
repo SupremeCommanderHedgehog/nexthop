@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While `nexthop` is pre-1.0, **minor** version bumps may include breaking changes;
 **patch** version bumps are backwards-compatible only.
 
+## [0.4.0](https://github.com/SupremeCommanderHedgehog/nexthop/compare/v0.3.0...v0.4.0) (2026-05-28)
+
+
+### Features
+
+* adopt Conventional Commits and release-please ([3060daf](https://github.com/SupremeCommanderHedgehog/nexthop/commit/3060daf0f9ed57706872808036a4796cfb4b05b8))
+* adopt Conventional Commits and release-please ([c7a76db](https://github.com/SupremeCommanderHedgehog/nexthop/commit/c7a76dba0ce7b3dd48c77e1c7a153d3460b3d9e5))
+
 ## [Unreleased]
 
 ## [0.3.0] - 2026-05-27

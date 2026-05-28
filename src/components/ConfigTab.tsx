@@ -79,19 +79,32 @@ function splitAddress(addr: string): { host: string; port: string } {
   return { host, port };
 }
 
+const HOSTNAME_RE =
+  /^(?=.{1,253}$)([a-zA-Z0-9-]{1,63})(\.[a-zA-Z0-9-]{1,63})*$/;
+const IPV4_RE = /^(\d{1,3})(\.\d{1,3}){3}$/;
+
+function looksLikeHost(s: string): boolean {
+  return IPV4_RE.test(s) || s.includes(":") || HOSTNAME_RE.test(s);
+}
+
 function TextInput({
   value,
   onChange,
   placeholder,
   disabled,
   className,
+  invalid,
 }: {
   value: string;
   onChange: (v: string) => void;
   placeholder?: string;
   disabled?: boolean;
   className?: string;
+  invalid?: boolean;
 }) {
+  const borderClass = invalid
+    ? "border-red-400 dark:border-red-500"
+    : "border-gray-300 dark:border-gray-600";
   return (
     <input
       type="text"
@@ -99,7 +112,7 @@ function TextInput({
       placeholder={placeholder}
       disabled={disabled}
       onChange={(e) => onChange(e.target.value)}
-      className={`border border-gray-300 dark:border-gray-600 rounded px-2 py-1 text-sm bg-white dark:bg-gray-800 disabled:opacity-50 ${className ?? ""}`}
+      className={`border ${borderClass} rounded px-2 py-1 text-sm bg-white dark:bg-gray-800 disabled:opacity-50 ${className ?? ""}`}
     />
   );
 }
@@ -368,6 +381,11 @@ export default function ConfigTab({
                 }}
                 placeholder="host"
                 className="w-48"
+                invalid={(() => {
+                  const p = config.source.address.split(":");
+                  const h = p.slice(0, -1).join(":") || p[0];
+                  return h !== "" && !looksLikeHost(h);
+                })()}
               />
             )}
             <Label>Port</Label>
@@ -543,6 +561,7 @@ export default function ConfigTab({
                           }
                           placeholder="host"
                           className="w-36"
+                          invalid={host !== "" && !looksLikeHost(host)}
                         />
                       )}
                     </td>

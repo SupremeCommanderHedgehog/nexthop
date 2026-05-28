@@ -488,36 +488,54 @@ When `general.health_port` is set, a minimal HTTP server starts on the configure
 ```json
 [
   {
-    "label":              "source(ingest)",
-    "local_addr":         "0.0.0.0:10000",
-    "peer_addr":          "",
-    "uptime_s":           120,
-    "rx_bytes":           4096000,
-    "tx_bytes":           0,
-    "messages":           0,
-    "active_connections": 1,
-    "total_connections":  3,
-    "errors":             0,
-    "dropped":            0
+    "label":               "source(ingest)",
+    "local_addr":          "0.0.0.0:10000",
+    "peer_addr":           "",
+    "uptime_s":            120,
+    "rx_bytes":            4096000,
+    "tx_bytes":            0,
+    "messages":            0,
+    "active_connections":  1,
+    "total_connections":   3,
+    "errors":              0,
+    "dropped":             0,
+    "dropped_overflow":    0,
+    "dropped_oversize":    0,
+    "dropped_validation":  0,
+    "dropped_write_error": 0
   },
   {
-    "label":              "dest(tcp-backend)",
-    "local_addr":         "",
-    "peer_addr":          "10.0.0.1:20000",
-    "uptime_s":           120,
-    "rx_bytes":           0,
-    "tx_bytes":           4096000,
-    "messages":           8000,
-    "active_connections": 1,
-    "total_connections":  1,
-    "errors":             0,
-    "dropped":            0
+    "label":               "dest(tcp-backend)",
+    "local_addr":          "",
+    "peer_addr":           "10.0.0.1:20000",
+    "uptime_s":            120,
+    "rx_bytes":            0,
+    "tx_bytes":            4096000,
+    "messages":            8000,
+    "active_connections":  1,
+    "total_connections":   1,
+    "errors":              0,
+    "dropped":             0,
+    "dropped_overflow":    0,
+    "dropped_oversize":    0,
+    "dropped_validation":  0,
+    "dropped_write_error": 0
   }
 ]
 ```
 
 All counter fields are unsigned 64-bit integers. `tx_bytes` on a destination counts
 bytes successfully written; `rx_bytes` on the source counts bytes read from the wire.
+
+The four `dropped_*` sub-counters partition `dropped` by cause and always sum to
+`dropped`:
+
+| Sub-counter | Increment when |
+|-------------|----------------|
+| `dropped_overflow` | The destination's internal queue was full when a packet arrived. |
+| `dropped_oversize` | A read exceeded `general.max_payload_size`. |
+| `dropped_validation` | A `[[destinations.transforms]]` stage returned `Drop` (see [Transforms](#transforms)). |
+| `dropped_write_error` | The destination's socket write failed (peer reset, etc.). |
 
 ### `/metrics` response shape
 
@@ -531,10 +549,17 @@ display name used in the logs (e.g. `source(ingest)`, `dest(tcp-backend)`).
 | `nexthop_tx_bytes_total` | counter | Bytes successfully written. |
 | `nexthop_messages_total` | counter | Discrete messages relayed. |
 | `nexthop_errors_total` | counter | Total error events. |
-| `nexthop_dropped_total` | counter | Packets dropped (queue overflow). |
+| `nexthop_dropped_total` | counter | Packets dropped (any cause). |
+| `nexthop_dropped_overflow_total` | counter | Subtotal: queue-overflow drops. |
+| `nexthop_dropped_oversize_total` | counter | Subtotal: payloads exceeding `max_payload_size`. |
+| `nexthop_dropped_validation_total` | counter | Subtotal: payloads rejected by a destination's transform pipeline (see [Transforms](#transforms)). |
+| `nexthop_dropped_write_error_total` | counter | Subtotal: drops caused by socket-level write errors. |
 | `nexthop_connections_opened_total` | counter | Cumulative connections opened. |
 | `nexthop_active_connections` | gauge | Currently open connections. |
 | `nexthop_uptime_seconds` | gauge | Seconds since the endpoint task started. |
+
+The four `nexthop_dropped_*_total` sub-counters partition
+`nexthop_dropped_total` by cause and always sum to it.
 
 Example scrape config:
 

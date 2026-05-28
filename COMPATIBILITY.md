@@ -59,10 +59,11 @@ Concretely, that means **all** of:
   `multicast_ttl`, `reconnect_delay_ms`.
 - `[rate_limit]` — `bytes_per_second`, `burst_size`.
 - `[[destinations]]` — every key the source table has, plus
-  `overflow_policy` and `rate_limit` (inline-table form). When the
-  transform pipeline ships, `[[destinations.transforms]]` joins this
-  set with its own per-transform `type` discriminator and
-  transform-specific fields.
+  `overflow_policy`, `rate_limit` (inline-table form), and
+  `transforms` (an ordered array-of-tables, each entry tagged with a
+  `type` discriminator and carrying its own transform-specific
+  fields; see `MANUAL.md`'s [Transforms](MANUAL.md#transforms)
+  section for the catalogue).
 
 Adding a **new** key with a sensible default is **not** a breaking
 change. Changing the default value of an existing key **is**, because

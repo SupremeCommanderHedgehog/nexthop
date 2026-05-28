@@ -228,6 +228,7 @@ address   = "0.0.0.0:20001"
 | `reconnect_delay_ms` | integer | `2000` | Reconnect pause in milliseconds. Only used in `mode = "client"`. |
 | `overflow_policy` | string | `"drop_newest"` | What to do when this destination's internal queue is full. `"drop_newest"` discards the incoming packet and keeps the source running. `"block"` applies back-pressure all the way to the source until the queue drains. Each destination has an independent policy and queue. |
 | `rate_limit` | inline table | *(inherit global)* | Per-destination token-bucket cap on this destination's egress (`bytes_per_second` + `burst_size`, same shape as the top-level `[rate_limit]`). When omitted, the destination shares the global `[rate_limit]` bucket (if any). See [Rate limiting](#rate-limiting). |
+| `transforms` | array of tables | *(none)* | Ordered list of per-destination payload transforms. Each entry is a `[[destinations.transforms]]` table with a `type` discriminator and transform-specific fields. See [Transforms](#transforms). |
 
 #### Protocol / mode combinations
 
@@ -237,6 +238,60 @@ address   = "0.0.0.0:20001"
 | `tcp` | `server` | Relay listens on `address`; fans out every packet to all connected peers. A reconnecting peer evicts its stale entry automatically. |
 | `udp` | `client` | Relay sends datagrams to `address` (unicast, broadcast, or multicast). |
 | `udp` | `server` | Relay binds `address`; any peer that sends a datagram to the port is registered. The relay then forwards to all registered peers. |
+
+---
+
+## Transforms
+
+Each destination can carry an ordered pipeline of payload **transforms**
+that run between the source fan-out and the destination's socket write.
+Transforms either pass a payload through (possibly modified) or drop it;
+the pipeline short-circuits on the first drop and increments the
+destination's `dropped_validation` counter.
+
+The pipeline is per-destination — two destinations forwarding the same
+source can each carry different transforms. The pipeline runs **after**
+the source fan-out and **before** the destination's rate-limit
+acquisition, so a payload dropped by a transform never consumes tokens.
+
+The design and the rationale for shipping only the transforms listed
+below are recorded in
+[ADR 0002](docs/adr/0002-transform-pipeline.md).
+
+```toml
+[[destinations]]
+protocol = "udp"
+mode     = "client"
+address  = "127.0.0.1:5001"
+
+[[destinations.transforms]]
+type    = "drop_smaller_than"
+n_bytes = 16
+```
+
+Order in the TOML is order in the pipeline. The list is rebuilt
+whenever this destination's transform list changes across a hot-reload —
+see the row for `[[destinations.transforms]]` in the
+[Hot reload](#hot-reload) matrix.
+
+### `drop_smaller_than`
+
+Drops payloads strictly smaller than `n_bytes`. Payloads of exactly
+`n_bytes` pass.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `n_bytes` | integer ≥ 0 | yes | Minimum payload size in bytes. |
+
+```toml
+[[destinations.transforms]]
+type    = "drop_smaller_than"
+n_bytes = 16
+```
+
+Each drop counts against the destination's `dropped_validation`
+sub-counter (visible at `/stats` and as
+`nexthop_dropped_validation_total` at `/metrics`).
 
 ---
 
@@ -293,9 +348,10 @@ else logs a targeted warning naming what needs a restart.
 | Adding a `[[destinations]]` entry | New destination task spawns and joins the fan-out atomically; existing destinations keep running. |
 | Removing a `[[destinations]]` entry | Source stops fanning out to it immediately; the destination task receives a per-task shutdown and drains in-flight messages (up to 5 s). Other destinations are unaffected. |
 | Changing a `[[destinations]]` identity field (`protocol`, `mode`, `address`, `cast_mode`, `multicast_*`) | Treated as a remove of the old destination plus an add of the new one. |
+| `[[destinations.transforms]]` (whole list, in any order) | Pipelines are built once at spawn and cannot be mutated in place. A transform-list change is treated as an identity change: the destination is removed and respawned with the new pipeline. In-flight payloads queued at the destination are dropped during the swap. |
 | `[[destinations]]` `name` | Cosmetic only; new log lines use the new name on next emission. |
 
-Identity for matching across reloads is `(protocol, mode, address, cast_mode, multicast_interface, multicast_interface_index)`. Two entries with the same identity are matched and updated in place; otherwise the old is removed and the new is added.
+Identity for matching across reloads is `(protocol, mode, address, cast_mode, multicast_interface, multicast_interface_index, transforms)`. Two entries with the same identity are matched and updated in place; otherwise the old is removed and the new is added.
 
 ### Restart required
 

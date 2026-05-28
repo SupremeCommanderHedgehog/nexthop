@@ -12,8 +12,9 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use bytes::{Bytes, BytesMut};
+use regex::bytes::Regex;
 
-use crate::config::{TimestampClock, TransformConfig};
+use crate::config::{RegexAction, TimestampClock, TransformConfig};
 use crate::stats::Stats;
 
 /// Outcome of one `Transform::apply` call.
@@ -50,6 +51,17 @@ pub fn build_pipeline(configs: &[TransformConfig]) -> Vec<Arc<dyn Transform>> {
                 clock: *clock,
                 monotonic_start: OnceLock::new(),
             }) as Arc<dyn Transform>,
+            TransformConfig::RegexFilter { pattern, action } => {
+                // Patterns are validated at config-load time
+                // (`RelayConfig::validate`); a panic here means the
+                // validator missed a case.
+                let re = Regex::new(pattern)
+                    .expect("regex_filter pattern should have been validated at config load");
+                Arc::new(RegexFilter {
+                    re,
+                    action: *action,
+                }) as Arc<dyn Transform>
+            }
         })
         .collect()
 }
@@ -167,6 +179,28 @@ impl Transform for PrependTimestamp {
         buf.extend_from_slice(&ts_ns.to_be_bytes());
         buf.extend_from_slice(&payload);
         Decision::Pass(buf.freeze())
+    }
+}
+
+/// Match payload bytes against a regex, dropping based on `action`.
+/// Matching is allocation-free via `regex::bytes::Regex::is_match`.
+pub struct RegexFilter {
+    pub re: Regex,
+    pub action: RegexAction,
+}
+
+impl Transform for RegexFilter {
+    fn apply(&self, payload: Bytes) -> Decision {
+        let matched = self.re.is_match(&payload);
+        let drop = match self.action {
+            RegexAction::DropMatch => matched,
+            RegexAction::DropNonMatch => !matched,
+        };
+        if drop {
+            Decision::Drop
+        } else {
+            Decision::Pass(payload)
+        }
     }
 }
 
@@ -384,5 +418,72 @@ mod tests {
         let out = apply_pipeline(&pipeline, &stats, Bytes::from_static(b"abc")).expect("Pass");
         assert_eq!(out.len(), 11); // 8-byte prefix + 3-byte payload
         assert_eq!(&out[8..], b"abc");
+    }
+
+    fn regex_filter(pattern: &str, action: RegexAction) -> RegexFilter {
+        RegexFilter {
+            re: Regex::new(pattern).unwrap(),
+            action,
+        }
+    }
+
+    #[test]
+    fn regex_filter_drop_match_drops_matching_payload() {
+        let t = regex_filter("^heartbeat:", RegexAction::DropMatch);
+        assert!(matches!(
+            t.apply(Bytes::from_static(b"heartbeat: ok")),
+            Decision::Drop
+        ));
+    }
+
+    #[test]
+    fn regex_filter_drop_match_passes_non_matching_payload() {
+        let t = regex_filter("^heartbeat:", RegexAction::DropMatch);
+        let payload = Bytes::from_static(b"data: 42");
+        match t.apply(payload.clone()) {
+            Decision::Pass(out) => assert_eq!(out, payload),
+            Decision::Drop => panic!("expected Pass for non-match"),
+        }
+    }
+
+    #[test]
+    fn regex_filter_drop_non_match_drops_non_matching_payload() {
+        let t = regex_filter("^heartbeat:", RegexAction::DropNonMatch);
+        assert!(matches!(
+            t.apply(Bytes::from_static(b"data: 42")),
+            Decision::Drop
+        ));
+    }
+
+    #[test]
+    fn regex_filter_drop_non_match_passes_matching_payload() {
+        let t = regex_filter("^heartbeat:", RegexAction::DropNonMatch);
+        let payload = Bytes::from_static(b"heartbeat: ok");
+        match t.apply(payload.clone()) {
+            Decision::Pass(out) => assert_eq!(out, payload),
+            Decision::Drop => panic!("expected Pass for match"),
+        }
+    }
+
+    #[test]
+    fn regex_filter_matches_non_utf8_bytes() {
+        // The `(?-u)` flag disables Unicode mode so `\xff\xfe` matches
+        // the literal byte sequence rather than the Unicode codepoints.
+        let t = regex_filter(r"(?-u)\xff\xfe", RegexAction::DropMatch);
+        let payload = Bytes::from_static(&[0xff, 0xfe, 0xab]);
+        assert!(matches!(t.apply(payload), Decision::Drop));
+    }
+
+    #[test]
+    fn build_pipeline_constructs_regex_filter() {
+        let cfgs = vec![TransformConfig::RegexFilter {
+            pattern: "^drop:".to_string(),
+            action: RegexAction::DropMatch,
+        }];
+        let pipeline = build_pipeline(&cfgs);
+        assert_eq!(pipeline.len(), 1);
+        let stats = Stats::new("test", "", "");
+        assert!(apply_pipeline(&pipeline, &stats, Bytes::from_static(b"drop: x")).is_none());
+        assert!(apply_pipeline(&pipeline, &stats, Bytes::from_static(b"keep: y")).is_some());
     }
 }

@@ -32,6 +32,7 @@ notify             = "6"
 futures            = "0.3"
 if-addrs           = "0.10"
 arc-swap           = "1"
+regex              = "1"
 
 [build-dependencies]
 # Mirror the runtime dep: `tauri-build` is only needed when the `gui`

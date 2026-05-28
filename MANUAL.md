@@ -293,6 +293,29 @@ Each drop counts against the destination's `dropped_validation`
 sub-counter (visible at `/stats` and as
 `nexthop_dropped_validation_total` at `/metrics`).
 
+### `drop_larger_than`
+
+Drops payloads strictly larger than `n_bytes`. Payloads of exactly
+`n_bytes` pass. Useful for guarding consumers that cannot handle
+PCAP-style oversized frames.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `n_bytes` | integer ≥ 0 | yes | Maximum payload size in bytes. |
+
+```toml
+[[destinations.transforms]]
+type    = "drop_larger_than"
+n_bytes = 1500
+```
+
+Drops count against `dropped_validation`, same as
+`drop_smaller_than`.
+
+Combining `drop_smaller_than` and `drop_larger_than` on one
+destination implements an inclusive size range. The order does not
+matter — both check independently.
+
 ---
 
 ## Rate limiting

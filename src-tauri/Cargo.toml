@@ -32,6 +32,9 @@ arc-swap           = "1"
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+[dev-dependencies]
+proptest = "1"
+
 [target.'cfg(unix)'.dev-dependencies]
 libc = "0.2"
 

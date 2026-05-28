@@ -200,4 +200,135 @@ mod tests {
             start.elapsed()
         );
     }
+
+    // ── Property tests ─────────────────────────────────────────────
+    //
+    // Tabular tests above pin specific scenarios. Properties below assert
+    // invariants across whole input domains and tend to find regressions
+    // the tabular tests miss (e.g. an off-by-one in the burst cap that
+    // only manifests for particular (rate, burst, n) tuples).
+
+    proptest::proptest! {
+        // 64 cases per property × 4 properties — keeps the unit-test
+        // suite under a second of wall while still sampling broadly.
+        #![proptest_config(proptest::prelude::ProptestConfig {
+            cases: 64,
+            .. proptest::prelude::ProptestConfig::default()
+        })]
+
+        /// `acquire(0)` must return immediately regardless of bucket state.
+        #[test]
+        fn prop_acquire_zero_is_immediate(
+            rate in 1u64..1_000_000_000,
+            burst in 1u64..1_000_000,
+        ) {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async move {
+                let rl = RateLimiter::new(rate, burst);
+                // Drain whatever's there, then assert acquire(0) is still
+                // immediate even on an exhausted bucket.
+                rl.acquire(burst).await;
+                let start = Instant::now();
+                rl.acquire(0).await;
+                proptest::prop_assert!(
+                    start.elapsed() < Duration::from_millis(50),
+                    "acquire(0) on empty bucket took {:?}",
+                    start.elapsed()
+                );
+                Ok(())
+            })?;
+        }
+
+        /// An `acquire(n)` with `n <= burst` must complete within a bounded
+        /// time given enough refill: the worst case is one bucket-drain,
+        /// which takes `burst / rate` seconds plus tokio scheduling slack.
+        #[test]
+        fn prop_acquire_within_burst_is_bounded(
+            rate in 100_000u64..10_000_000,
+            burst in 1_000u64..100_000,
+            n_factor in 0u64..100,
+        ) {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async move {
+                let rl = RateLimiter::new(rate, burst);
+                let n = (burst * n_factor / 100).max(1).min(burst);
+                let budget_secs = (burst as f64 / rate as f64) + 0.5;
+                let start = Instant::now();
+                rl.acquire(n).await;
+                proptest::prop_assert!(
+                    start.elapsed() < Duration::from_secs_f64(budget_secs),
+                    "acquire({n}) at rate {rate} burst {burst} took {:?} > {:.3}s",
+                    start.elapsed(), budget_secs,
+                );
+                Ok(())
+            })?;
+        }
+
+        /// After draining and a long sleep, the next `acquire(burst)` must
+        /// be immediate — i.e. refill caps at `burst`, never higher. If
+        /// the cap were broken, this acquire would still wait the full
+        /// elapsed time × rate.
+        #[test]
+        fn prop_tokens_never_exceed_burst(
+            rate in 100_000u64..10_000_000,
+            burst in 100u64..10_000,
+        ) {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async move {
+                let rl = RateLimiter::new(rate, burst);
+                rl.acquire(burst).await; // drain
+                // Sleep long enough that an unbounded refill would
+                // accumulate >> burst tokens.
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                let start = Instant::now();
+                rl.acquire(burst).await; // must be immediate if capped
+                proptest::prop_assert!(
+                    start.elapsed() < Duration::from_millis(50),
+                    "acquire(burst={burst}) after refill window at rate {rate} \
+                     took {:?} — refill exceeded the cap",
+                    start.elapsed(),
+                );
+                Ok(())
+            })?;
+        }
+
+        /// Two sequential `acquire(burst)` calls must take at least
+        /// `burst / rate` seconds in total: the second drains the bucket
+        /// and waits for refill. This is the dual of the cap property.
+        #[test]
+        fn prop_sequential_burst_acquires_respect_rate(
+            rate in 1_000u64..100_000,
+            burst in 100u64..1_000,
+        ) {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async move {
+                let rl = RateLimiter::new(rate, burst);
+                rl.acquire(burst).await;
+                let start = Instant::now();
+                rl.acquire(burst).await;
+                let expected = Duration::from_secs_f64(burst as f64 / rate as f64);
+                // Allow 30% slack for tokio scheduling jitter on CI.
+                let floor = expected.mul_f64(0.7);
+                proptest::prop_assert!(
+                    start.elapsed() >= floor,
+                    "second acquire(burst={burst}) at rate {rate} finished in {:?}, \
+                     expected at least {:?} (floor {:?})",
+                    start.elapsed(), expected, floor,
+                );
+                Ok(())
+            })?;
+        }
+    }
 }

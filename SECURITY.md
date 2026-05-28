@@ -6,8 +6,8 @@ Only the latest release of `nexthop` receives security updates.
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 0.2.0   | :white_check_mark: |
-| < 0.2.0 | :x:                |
+| 0.3.0   | :white_check_mark: |
+| < 0.3.0 | :x:                |
 
 ## Reporting a Vulnerability
 

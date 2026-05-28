@@ -1,5 +1,10 @@
 # nexthop
 
+[![Rust CI](https://github.com/SupremeCommanderHedgehog/nexthop/actions/workflows/rust.yml/badge.svg)](https://github.com/SupremeCommanderHedgehog/nexthop/actions/workflows/rust.yml)
+[![Latest release](https://img.shields.io/github/v/release/SupremeCommanderHedgehog/nexthop?sort=semver)](https://github.com/SupremeCommanderHedgehog/nexthop/releases)
+[![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE.md)
+[![Rust 1.77+](https://img.shields.io/badge/rust-1.77%2B-orange.svg)](#requirements)
+
 A raw TCP/UDP relay with cross-protocol forwarding, multicast/broadcast support,
 per-destination back-pressure, token-bucket rate limiting, and live config reload.
 Ships as a native desktop app (Tauri v2 + React) with an optional headless mode

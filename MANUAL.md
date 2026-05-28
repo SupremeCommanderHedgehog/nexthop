@@ -101,7 +101,7 @@ The file is [TOML](https://toml.io). It has three top-level sections:
 |---------|----------|-------------|
 | `[general]` | yes | Global process settings. |
 | `[source]` | yes | The single inbound endpoint. |
-| `[rate_limit]` | no | Token-bucket rate limiter applied to all inbound traffic. Omit the section entirely for unlimited throughput. |
+| `[rate_limit]` | no | Token-bucket rate limiter used as the default for every destination that does not specify its own. Omit the section entirely for unlimited throughput. See [Rate limiting](#rate-limiting) for the precedence rules. |
 | `[[destinations]]` | yes (≥ 1) | One or more outbound endpoints. Repeat the header for each destination. |
 
 ---
@@ -162,8 +162,12 @@ reconnect_delay_ms        = 2000          # optional (client mode only)
 
 ### `[rate_limit]`
 
-Applies a global token-bucket rate limit to all bytes read from the source before they
-are forwarded. Omit the entire section for unlimited throughput.
+A token-bucket rate limit that destinations acquire from before writing each
+packet. Destinations without their own `rate_limit` share this bucket as their
+default; destinations with their own override use that instead (see
+[Rate limiting](#rate-limiting) for the precedence rules and a note on what
+changed in 0.4.0). Omit the section entirely for unlimited throughput by
+default.
 
 ```toml
 [rate_limit]
@@ -195,6 +199,7 @@ mode                      = "client"
 address                   = "127.0.0.1:20000"
 reconnect_delay_ms        = 3000
 overflow_policy           = "drop_newest"
+rate_limit                = { bytes_per_second = 1048576, burst_size = 16384 }
 ```
 
 ```toml
@@ -217,6 +222,7 @@ address   = "0.0.0.0:20001"
 | `multicast_ttl` | integer | `16` | TTL for multicast datagrams. |
 | `reconnect_delay_ms` | integer | `2000` | Reconnect pause in milliseconds. Only used in `mode = "client"`. |
 | `overflow_policy` | string | `"drop_newest"` | What to do when this destination's internal queue is full. `"drop_newest"` discards the incoming packet and keeps the source running. `"block"` applies back-pressure all the way to the source until the queue drains. Each destination has an independent policy and queue. |
+| `rate_limit` | inline table | *(inherit global)* | Per-destination token-bucket cap on this destination's egress (`bytes_per_second` + `burst_size`, same shape as the top-level `[rate_limit]`). When omitted, the destination shares the global `[rate_limit]` bucket (if any). See [Rate limiting](#rate-limiting). |
 
 #### Protocol / mode combinations
 
@@ -226,6 +232,40 @@ address   = "0.0.0.0:20001"
 | `tcp` | `server` | Relay listens on `address`; fans out every packet to all connected peers. A reconnecting peer evicts its stale entry automatically. |
 | `udp` | `client` | Relay sends datagrams to `address` (unicast, broadcast, or multicast). |
 | `udp` | `server` | Relay binds `address`; any peer that sends a datagram to the port is registered. The relay then forwards to all registered peers. |
+
+---
+
+## Rate limiting
+
+Each destination resolves its effective limiter on every write:
+
+1. If the destination has its own `rate_limit` (per-`[[destinations]]` inline
+   table), it acquires tokens from that **private** bucket. Nothing else
+   shares it.
+2. Otherwise, if the top-level `[rate_limit]` section is set, the
+   destination acquires from that **shared global** bucket. All destinations
+   that fall back to global share the same token budget.
+3. Otherwise, writes are unlimited.
+
+**Precedence is per-dest > global.** A destination with its own `rate_limit`
+ignores the global section entirely.
+
+Both bucket types live in the destination's write path, not the source:
+acquiring tokens gates the *outgoing* write to that destination only, so a
+slow consumer is throttled in isolation without back-pressuring the source
+or the other destinations. When a destination's bucket is drained, packets
+queue in its internal channel; when that channel fills, the destination's
+`overflow_policy` takes over (drop or block).
+
+> **Semantics change from 0.3.x:** prior to 0.4.0 the global `[rate_limit]`
+> gated bytes read from the source, capping total ingress. As of 0.4.0 it
+> applies on the destination side as a shared fallback. The total egress
+> cap for a global-only config is unchanged (one bucket, same rate), but
+> the failure mode shifts: a bursty source no longer self-throttles, so
+> destinations with `overflow_policy = "drop_newest"` may see more drops
+> than before under the same load. Add per-destination `rate_limit`
+> entries or switch overloaded destinations to `overflow_policy = "block"`
+> if that matters for your deployment.
 
 ---
 
@@ -239,7 +279,8 @@ else logs a targeted warning naming what needs a restart.
 
 | Field | Effect timing |
 |-------|----------------|
-| `[rate_limit]` (whole section, including removal) | Applied on the next packet. |
+| `[rate_limit]` (whole section, including removal) | Applied on the next packet at every destination that falls back to the global bucket. |
+| `[[destinations]]` `rate_limit` | New private bucket installed; takes effect on the destination's next write. Removing the per-dest entry reverts that destination to the global bucket. |
 | `general.log_level` | Filter is swapped on the underlying `tracing` subscriber; new lines respect the new level immediately. Headless mode only — the GUI uses a fixed subscriber. |
 | `general.stats_interval_secs` | Each reporter re-reads the value on its next tick. A change applied mid-tick takes effect on the following cycle. |
 | `[[destinations]]` `overflow_policy` | Read by the source fan-out per packet, so the next packet observes the new policy. |

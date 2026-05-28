@@ -1032,4 +1032,187 @@ address  = "127.0.0.1:20000"
             "default TTL should be omitted:\n{out}"
         );
     }
+
+    // ── Property tests ─────────────────────────────────────────────
+    //
+    // The tabular tests above pin specific shapes; the strategies below
+    // generate configs across the *valid* input domain and assert two
+    // load-bearing invariants — round-trip stability of TOML
+    // serialization, and parser robustness against arbitrary input.
+
+    use proptest::prelude::*;
+
+    fn log_level_strategy() -> impl Strategy<Value = String> {
+        prop::sample::select(vec!["trace", "debug", "info", "warn", "error"])
+            .prop_map(|s| s.to_string())
+    }
+
+    fn bind_addr_strategy() -> impl Strategy<Value = Option<String>> {
+        prop::option::of(
+            prop::sample::select(vec!["127.0.0.1", "0.0.0.0", "::1", "::"])
+                .prop_map(|s| s.to_string()),
+        )
+    }
+
+    fn general_strategy() -> impl Strategy<Value = GeneralConfig> {
+        (
+            log_level_strategy(),
+            1u64..3600,
+            1usize..2048,
+            1usize..65_536,
+            prop::option::of(1024u16..65535),
+            bind_addr_strategy(),
+        )
+            .prop_map(
+                |(
+                    log_level,
+                    stats_interval_secs,
+                    channel_capacity,
+                    max_payload_size,
+                    health_port,
+                    health_bind_addr,
+                )| GeneralConfig {
+                    log_level,
+                    stats_interval_secs,
+                    channel_capacity,
+                    max_payload_size,
+                    health_port,
+                    health_bind_addr,
+                },
+            )
+    }
+
+    fn rate_limit_strategy() -> impl Strategy<Value = RateLimitConfig> {
+        (1u64..1_000_000, 1u64..1_000_000).prop_map(|(bps, burst)| RateLimitConfig {
+            bytes_per_second: bps,
+            burst_size: burst,
+        })
+    }
+
+    // Generate addresses we know the validator accepts: loopback IPv4 with
+    // a non-zero port. Multicast / broadcast paths have a richer validation
+    // surface and would need their own dedicated strategies to stay
+    // round-trip-safe; the round-trip property here covers the common case.
+    fn address_strategy() -> impl Strategy<Value = String> {
+        (1u16..=u16::MAX).prop_map(|port| format!("127.0.0.1:{port}"))
+    }
+
+    fn name_strategy() -> impl Strategy<Value = Option<String>> {
+        // ASCII letters/digits + a hyphen, so we never trip the TOML
+        // string-escape edge cases that the manual serializer handles
+        // (the round-trip property tests the parser/serializer pair, not
+        // the escape implementation, which has dedicated tabular tests).
+        prop::option::of("[A-Za-z0-9-]{1,16}".prop_map(|s| s.to_string()))
+    }
+
+    fn unicast_endpoint_strategy() -> impl Strategy<Value = EndpointConfig> {
+        (
+            name_strategy(),
+            prop::sample::select(vec![Protocol::Tcp, Protocol::Udp]),
+            prop::sample::select(vec![EndpointMode::Server, EndpointMode::Client]),
+            address_strategy(),
+            prop::option::of(100u64..10_000),
+        )
+            .prop_map(|(name, protocol, mode, address, reconnect_delay_ms)| {
+                EndpointConfig {
+                    name,
+                    protocol,
+                    mode,
+                    address,
+                    cast_mode: CastMode::Unicast,
+                    multicast_interface: None,
+                    multicast_interface_index: None,
+                    multicast_ttl: defaults::multicast_ttl(),
+                    reconnect_delay_ms,
+                }
+            })
+    }
+
+    fn dest_strategy() -> impl Strategy<Value = DestConfig> {
+        (
+            unicast_endpoint_strategy(),
+            prop::sample::select(vec![OverflowPolicy::DropNewest, OverflowPolicy::Block]),
+            prop::option::of(rate_limit_strategy()),
+        )
+            .prop_map(|(base, overflow_policy, rate_limit)| DestConfig {
+                base,
+                overflow_policy,
+                rate_limit,
+            })
+    }
+
+    fn relay_config_strategy() -> impl Strategy<Value = RelayConfig> {
+        (
+            general_strategy(),
+            unicast_endpoint_strategy(),
+            prop::option::of(rate_limit_strategy()),
+            prop::collection::vec(dest_strategy(), 1..4),
+        )
+            .prop_map(|(general, source, rate_limit, destinations)| RelayConfig {
+                general,
+                source,
+                rate_limit,
+                destinations,
+            })
+    }
+
+    proptest! {
+        // Modest case count: the generators are cheap but each round-trip
+        // does two TOML conversions, so 64 keeps the suite snappy.
+        #![proptest_config(ProptestConfig { cases: 64, .. ProptestConfig::default() })]
+
+        /// Any config produced by our strategy must survive
+        /// `to_toml_string → toml::from_str` unchanged. This guards
+        /// against drift between the hand-rolled emitter (`to_toml_string`)
+        /// and the serde-derived parser.
+        #[test]
+        fn prop_valid_config_roundtrips_through_toml(cfg in relay_config_strategy()) {
+            // Pre-condition: the strategy only emits configs the validator
+            // accepts. Bail out cleanly if a future widening violates that
+            // so the property failure points at the real issue.
+            prop_assume!(cfg.validate().is_ok());
+            let serialized = to_toml_string(&cfg);
+            let parsed: RelayConfig = toml::from_str(&serialized)
+                .map_err(|e| TestCaseError::fail(format!("re-parse failed: {e}\n--- TOML ---\n{serialized}")))?;
+            prop_assert_eq!(cfg, parsed);
+        }
+
+        /// Arbitrary UTF-8 strings must never panic the parser. They will
+        /// usually fail to parse — that's fine — but the failure must
+        /// always come back as an `Err`, never an unwrap or arithmetic
+        /// crash.
+        #[test]
+        fn prop_arbitrary_toml_does_not_panic(s in "\\PC{0,512}") {
+            // Result intentionally discarded; the test passes if no
+            // panic propagates out.
+            let _ = toml::from_str::<RelayConfig>(&s);
+        }
+
+        /// `validate()` must reject every config whose
+        /// `rate_limit.bytes_per_second` is zero, regardless of what
+        /// the rest of the config looks like.
+        #[test]
+        fn prop_zero_global_rate_is_rejected(mut cfg in relay_config_strategy()) {
+            cfg.rate_limit = Some(RateLimitConfig {
+                bytes_per_second: 0,
+                burst_size: 1,
+            });
+            prop_assert!(cfg.validate().is_err());
+        }
+
+        /// Same for per-destination rate limit: a zero rate on any
+        /// destination must surface as a validation error.
+        #[test]
+        fn prop_zero_per_dest_rate_is_rejected(
+            mut cfg in relay_config_strategy(),
+            idx in 0usize..16,
+        ) {
+            let i = idx % cfg.destinations.len();
+            cfg.destinations[i].rate_limit = Some(RateLimitConfig {
+                bytes_per_second: 0,
+                burst_size: 1,
+            });
+            prop_assert!(cfg.validate().is_err());
+        }
+    }
 }

@@ -133,6 +133,26 @@ npm run test:watch
 
 ---
 
+## Developing
+
+This repo ships a [`pre-commit`](https://pre-commit.com/) configuration that
+runs gitleaks plus `cargo fmt --check` and `cargo clippy -- -D warnings` on
+every commit that touches Rust files. Install it once per checkout so format
+or lint issues are caught locally before they reach CI:
+
+```sh
+pip install pre-commit       # one-time, system-wide
+pre-commit install           # per-checkout, installs the git hook
+
+# Rescan the whole tree on demand:
+pre-commit run --all-files
+```
+
+The clippy hook only fires when `*.rs` files are staged, so non-Rust commits
+are not slowed down.
+
+---
+
 ## SBOM
 
 Each tagged release ships with two Software Bill of Materials files

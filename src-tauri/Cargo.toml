@@ -13,7 +13,11 @@ name       = "nexthop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [dependencies]
-tauri              = { version = "2", features = [] }
+# `tauri` is optional so consumers that only need the headless relay
+# (fuzz harnesses, other embedders) can disable the `gui` feature and
+# drop the entire Tauri toolchain — including the `generate_context!`
+# proc-macro that validates the frontend dist at compile time.
+tauri              = { version = "2", features = [], optional = true }
 serde              = { version = "1", features = ["derive"] }
 serde_json         = "1"
 tokio              = { version = "1", features = ["full"] }
@@ -30,7 +34,11 @@ if-addrs           = "0.10"
 arc-swap           = "1"
 
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+# Mirror the runtime dep: `tauri-build` is only needed when the `gui`
+# feature is on. Without the matching gate, `cargo build
+# --no-default-features` would still pull tauri-build and run
+# `tauri_build::build()`.
+tauri-build = { version = "2", features = [], optional = true }
 
 [dev-dependencies]
 proptest = "1"
@@ -39,5 +47,10 @@ proptest = "1"
 libc = "0.2"
 
 [features]
+# `gui` brings in Tauri (runtime + build script). `custom-protocol`
+# layers Tauri's custom-protocol asset embedding on top of `gui`. The
+# default keeps existing behavior — `cargo build` at the repo root
+# still produces the desktop app.
 default         = ["custom-protocol"]
-custom-protocol = ["tauri/custom-protocol"]
+gui             = ["dep:tauri", "dep:tauri-build"]
+custom-protocol = ["gui", "tauri/custom-protocol"]

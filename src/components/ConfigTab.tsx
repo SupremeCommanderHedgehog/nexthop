@@ -62,6 +62,23 @@ const MULTICAST_MODE_LABELS: Partial<Record<EndpointMode, string>> = {
   server: "subscriber",
 };
 
+function defaultHostFor(
+  cast: CastMode,
+  role: "source" | "destination",
+  broadcastIps: string[],
+): string {
+  if (cast === "multicast") return "224.0.0.1";
+  if (cast === "broadcast") return broadcastIps[0] ?? "255.255.255.255";
+  return role === "source" ? "0.0.0.0" : "127.0.0.1";
+}
+
+function splitAddress(addr: string): { host: string; port: string } {
+  const parts = addr.split(":");
+  const host = parts.slice(0, -1).join(":") || parts[0];
+  const port = parts[parts.length - 1] ?? "5000";
+  return { host, port };
+}
+
 function TextInput({
   value,
   onChange,
@@ -269,7 +286,11 @@ export default function ConfigTab({
               value={config.source.cast_mode}
               options={SOURCE_CAST_MODES}
               onChange={(v) => {
-                const patch: Partial<typeof config.source> = { cast_mode: v };
+                const { port } = splitAddress(config.source.address);
+                const patch: Partial<typeof config.source> = {
+                  cast_mode: v,
+                  address: `${defaultHostFor(v, "source", broadcastIps)}:${port}`,
+                };
                 if (v !== "unicast") patch.protocol = "udp";
                 if (v === "multicast") patch.mode = "server";
                 updateSource(patch);
@@ -446,7 +467,10 @@ export default function ConfigTab({
                         value={dest.cast_mode}
                         options={CAST_MODES}
                         onChange={(v) => {
-                          const patch: Partial<DestConfig> = { cast_mode: v };
+                          const patch: Partial<DestConfig> = {
+                            cast_mode: v,
+                            address: `${defaultHostFor(v, "destination", broadcastIps)}:${port}`,
+                          };
                           if (v !== "unicast") patch.protocol = "udp";
                           updateDest(idx, patch);
                         }}

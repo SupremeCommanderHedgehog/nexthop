@@ -115,6 +115,7 @@ stats_interval_secs = 30       # optional — default: 30
 channel_capacity    = 1024     # optional — default: 1024
 max_payload_size    = 65535    # optional — default: 65535
 health_port         = 9090     # optional — omit to disable
+health_bind_addr    = "::"     # optional — omit for dual-stack default
 ```
 
 | Key | Type | Default | Description |
@@ -123,7 +124,8 @@ health_port         = 9090     # optional — omit to disable
 | `stats_interval_secs` | integer | `30` | How often (in seconds) each endpoint logs a statistics summary. A final summary is also logged on shutdown. |
 | `channel_capacity` | integer | `1024` | Depth of the internal per-destination queue (number of payloads). When the queue is full the destination's `overflow_policy` determines what happens. |
 | `max_payload_size` | integer | `65535` | Maximum single-read payload in bytes. TCP reads and UDP datagrams larger than this are dropped and counted as errors. Must be > 0. |
-| `health_port` | integer | *(disabled)* | TCP port for the built-in HTTP health/stats server. When set, the server listens on `0.0.0.0:<health_port>`. See [Health endpoint](#health-endpoint) below. Omit the key to disable completely. |
+| `health_port` | integer | *(disabled)* | TCP port for the built-in HTTP health/stats server. When set, the server listens on both `0.0.0.0` and `::` by default (see `health_bind_addr`). See [Health endpoint](#health-endpoint) below. Omit the key to disable completely. |
+| `health_bind_addr` | string | *(dual-stack)* | Override for the health server's bind interface. When omitted, the server binds **both** `0.0.0.0` (IPv4) and `::` (IPv6) so it is reachable on every interface. Set to a specific IP to restrict — e.g. `"127.0.0.1"` for IPv4 loopback only, `"::1"` for IPv6 loopback only, `"::"` for all-IPv6 only. The IPv6 listener is bound with `IPV6_V6ONLY=true` to avoid v4-mapped behaviour differences across platforms. |
 
 ---
 
@@ -256,13 +258,13 @@ Identity for matching across reloads is `(protocol, mode, address, cast_mode, mu
 | `[source]` (any field) | Would force-drop in-flight source connections and re-bind the listening socket. |
 | `general.channel_capacity` | Baked into the bounded `mpsc::channel` at construction; would need to recreate every per-destination queue and drain in-flight messages. |
 | `general.max_payload_size` | Used by source read loops to size buffers and validate payloads — a mid-flight change would skew accounting. |
-| `general.health_port` | Bound once at startup; changing the port means listening on a different address, which restart handles cleanly. |
+| `general.health_port` and `general.health_bind_addr` | Bound once at startup; changing either means listening on a different address, which restart handles cleanly. |
 
 ---
 
 ## Health endpoint
 
-When `general.health_port` is set, a minimal HTTP server starts on `0.0.0.0:<port>`.
+When `general.health_port` is set, a minimal HTTP server starts on the configured port. By default it listens on **both** `0.0.0.0:<port>` (IPv4) and `[::]:<port>` (IPv6) so it is reachable on every interface; set `general.health_bind_addr` to restrict to a specific interface or address family.
 
 | Path | Method | Response |
 |------|--------|----------|

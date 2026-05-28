@@ -8,7 +8,7 @@ use crate::config::{
 };
 use crate::prefs::Prefs;
 use crate::relay::Relay;
-use crate::stats::{Stats, StatsSnapshot};
+use crate::stats::StatsSnapshot;
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -89,8 +89,7 @@ pub fn start_relay(config: RelayConfig, state: State<AppState>) -> Result<(), St
 
     let config_path_str = state.config_path.to_string_lossy().to_string();
     let relay = Relay::new(config, config_path_str);
-    let source_stats = Arc::clone(&relay.source_stats);
-    let dest_stats: Vec<Arc<Stats>> = relay.dest_stats.iter().map(Arc::clone).collect();
+    let live_stats = Arc::clone(&relay.live_stats);
     let shutdown_tx = relay.shutdown_sender();
     let done = Arc::new(AtomicBool::new(false));
     let done_clone = Arc::clone(&done);
@@ -105,8 +104,7 @@ pub fn start_relay(config: RelayConfig, state: State<AppState>) -> Result<(), St
 
     *relay_guard = RelayState::Running {
         shutdown_tx,
-        source_stats,
-        dest_stats,
+        live_stats,
         done,
     };
     Ok(())
@@ -158,14 +156,16 @@ pub struct StatsPayload {
 pub fn get_stats(state: State<AppState>) -> Result<StatsPayload, String> {
     let relay_guard = state.relay.lock().map_err(|_| "state lock poisoned")?;
     match *relay_guard {
-        RelayState::Running {
-            ref source_stats,
-            ref dest_stats,
-            ..
-        } => Ok(StatsPayload {
-            source: source_stats.snapshot(),
-            destinations: dest_stats.iter().map(|s| s.snapshot()).collect(),
-        }),
+        RelayState::Running { ref live_stats, .. } => {
+            let snapshot = live_stats.load_full();
+            let Some(source) = snapshot.first() else {
+                return Err("relay is starting up".into());
+            };
+            Ok(StatsPayload {
+                source: source.snapshot(),
+                destinations: snapshot[1..].iter().map(|s| s.snapshot()).collect(),
+            })
+        }
         RelayState::Stopped => Err("relay is not running".into()),
     }
 }

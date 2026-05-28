@@ -27,6 +27,7 @@ clap               = { version = "4", features = ["derive"] }
 notify             = "6"
 futures            = "0.3"
 if-addrs           = "0.10"
+arc-swap           = "1"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

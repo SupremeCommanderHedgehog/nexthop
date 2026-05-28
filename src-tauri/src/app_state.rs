@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026-present Patrick S Connallon
 
-use crate::stats::Stats;
+use crate::relay::LiveStats;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
@@ -11,8 +11,10 @@ pub enum RelayState {
     Stopped,
     Running {
         shutdown_tx: Arc<watch::Sender<bool>>,
-        source_stats: Arc<Stats>,
-        dest_stats: Vec<Arc<Stats>>,
+        /// Lock-free shared view: source stats first, then each destination
+        /// in current-config order. The supervisor swaps the inner Vec on
+        /// every add/remove, so every `get_stats` reflects the live set.
+        live_stats: LiveStats,
         done: Arc<AtomicBool>,
     },
 }

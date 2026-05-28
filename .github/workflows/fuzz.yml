@@ -56,36 +56,12 @@ jobs:
             echo "seconds=300" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          cache: npm
-
       - uses: dtolnay/rust-toolchain@nightly
 
-      # The fuzz crate depends transitively on Tauri (via nexthop_lib),
-      # which on Linux pulls gio-sys / glib-sys / gobject-sys / webkit
-      # bindings — those need system dev packages at build time. Same
-      # set the main Rust CI installs.
-      - name: Install Linux dependencies (Tauri)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libgtk-3-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev
-
-      # `tauri::generate_context!()` is invoked from `lib.rs` and runs at
-      # compile time; it validates the tauri config against the
-      # filesystem and panics if `frontendDist` (the built `dist/`) is
-      # absent. The fuzz harnesses never call into the Tauri path, but
-      # nexthop_lib still has to compile, so we build the frontend
-      # exactly like the main Rust CI does.
-      - name: Build frontend
-        run: |
-          npm ci
-          npm run build
+      # No need for Tauri Linux deps or the frontend build here: the
+      # fuzz crate depends on nexthop_lib with `default-features =
+      # false`, which drops Tauri (and `tauri::generate_context!`,
+      # which would otherwise demand a built `dist/` at compile time).
 
       - uses: Swatinem/rust-cache@v2
         with:

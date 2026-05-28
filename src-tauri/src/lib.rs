@@ -1,20 +1,21 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026-present Patrick S Connallon
 
+#[cfg(feature = "gui")]
 mod app_state;
+#[cfg(feature = "gui")]
 mod commands;
 pub mod config;
 pub mod error;
+#[cfg(feature = "gui")]
 mod prefs;
 mod rate_limiter;
 mod relay;
 mod stats;
 mod transport;
 
-use app_state::{AppState, RelayState};
 use clap::Parser;
-use std::sync::{Arc, Mutex};
-use tauri::Manager;
+use std::sync::Arc;
 use tracing_subscriber::{layer::SubscriberExt, reload, util::SubscriberInitExt, EnvFilter};
 
 #[derive(clap::ValueEnum, Debug, Clone, Default)]
@@ -45,8 +46,17 @@ pub fn run() {
     let cli = Cli::parse();
     if cli.no_gui {
         run_headless(cli);
-    } else {
-        run_tauri(cli);
+        return;
+    }
+    #[cfg(feature = "gui")]
+    run_tauri(cli);
+    #[cfg(not(feature = "gui"))]
+    {
+        eprintln!(
+            "fatal: this build was compiled without the `gui` feature; pass --no-gui to run \
+             the relay in headless mode"
+        );
+        std::process::exit(2);
     }
 }
 
@@ -99,7 +109,12 @@ fn run_headless(cli: Cli) {
     }
 }
 
+#[cfg(feature = "gui")]
 fn run_tauri(cli: Cli) {
+    use app_state::{AppState, RelayState};
+    use std::sync::Mutex;
+    use tauri::Manager;
+
     let explicit_config = if cli.config == "nexthop.toml" {
         None
     } else {

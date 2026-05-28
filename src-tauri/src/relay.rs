@@ -551,6 +551,7 @@ async fn send_to_all(channels: &LiveChannels, data: Bytes) {
 /// log a warning.
 pub type LogLevelSetter = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
+#[cfg_attr(not(feature = "gui"), allow(dead_code))]
 fn noop_log_setter() -> LogLevelSetter {
     Arc::new(|_| false)
 }
@@ -583,6 +584,7 @@ pub struct Relay {
 }
 
 impl Relay {
+    #[cfg_attr(not(feature = "gui"), allow(dead_code))]
     pub fn new(config: RelayConfig, config_path: String) -> Self {
         Self::with_log_setter(config, config_path, noop_log_setter())
     }
@@ -645,6 +647,7 @@ impl Relay {
 
     /// Clone the shutdown sender so external callers (e.g. the GUI) can stop
     /// the relay without owning it.
+    #[cfg_attr(not(feature = "gui"), allow(dead_code))]
     pub fn shutdown_sender(&self) -> Arc<watch::Sender<bool>> {
         Arc::clone(&self.shutdown_tx)
     }

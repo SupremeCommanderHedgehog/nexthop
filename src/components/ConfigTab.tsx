@@ -470,7 +470,7 @@ export default function ConfigTab({
                               : "border-gray-300 dark:border-gray-600"
                           }`}
                         />
-                      ) : dest.mode === "server" && dest.cast_mode === "broadcast" ? (
+                      ) : dest.cast_mode === "broadcast" ? (
                         <select
                           value={host}
                           onChange={(e) =>
@@ -482,7 +482,7 @@ export default function ConfigTab({
                             <option key={ip} value={ip}>{ip}</option>
                           ))}
                         </select>
-                      ) : dest.mode === "server" || dest.cast_mode === "broadcast" ? (
+                      ) : dest.mode === "server" ? (
                         <select
                           value={host}
                           onChange={(e) =>

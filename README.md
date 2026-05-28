@@ -50,11 +50,17 @@ for running as a service or in CI pipelines.
 npm install
 
 # Development build — hot-reload frontend + live Tauri window
-npm run tauri dev
+npm run tauri:dev
 
 # Production build (output in src-tauri/target/release/)
-npm run tauri build
+npm run tauri:build
 ```
+
+Both scripts pass `--features` to the Tauri CLI so the `gui` /
+`custom-protocol` cargo features stay on through the
+`--no-default-features` flag the Tauri CLI applies internally. See
+[#71](https://github.com/SupremeCommanderHedgehog/nexthop/issues/71)
+for background.
 
 ---
 

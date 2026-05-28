@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While `nexthop` is pre-1.0, **minor** version bumps may include breaking changes;
 **patch** version bumps are backwards-compatible only.
 
+## [0.5.0](https://github.com/SupremeCommanderHedgehog/nexthop/compare/v0.4.0...v0.5.0) (2026-05-28)
+
+
+### Features
+
+* byte_swap_16 and byte_swap_32 transforms ([266f66b](https://github.com/SupremeCommanderHedgehog/nexthop/commit/266f66b8b697d2cb0efad0356ef68e8227fe06b0))
+* byte_swap_16 and byte_swap_32 transforms ([afeeb24](https://github.com/SupremeCommanderHedgehog/nexthop/commit/afeeb24e79be5720bcbd122dac38d67c0c73c0db)), closes [#81](https://github.com/SupremeCommanderHedgehog/nexthop/issues/81)
+* drop_larger_than transform ([852d187](https://github.com/SupremeCommanderHedgehog/nexthop/commit/852d187bd9251ba53645b46aad729e77c5dff1e6))
+* drop_larger_than transform ([a0f682b](https://github.com/SupremeCommanderHedgehog/nexthop/commit/a0f682b2bb03ee923bcff45bc22ed4fbcc9c7d61)), closes [#80](https://github.com/SupremeCommanderHedgehog/nexthop/issues/80)
+* per-destination transform pipeline with drop_smaller_than ([1b6c56a](https://github.com/SupremeCommanderHedgehog/nexthop/commit/1b6c56a78b6840c82e082e045e2d38b4a126a750))
+* per-destination transform pipeline with drop_smaller_than ([c7e8ea1](https://github.com/SupremeCommanderHedgehog/nexthop/commit/c7e8ea19ac3d4cb1a655c02e82e10cb80f1242aa)), closes [#79](https://github.com/SupremeCommanderHedgehog/nexthop/issues/79)
+* prepend_timestamp transform ([046ad81](https://github.com/SupremeCommanderHedgehog/nexthop/commit/046ad81d28b3870d4609d7c65dc548ff45364ca2))
+* prepend_timestamp transform ([3174a4b](https://github.com/SupremeCommanderHedgehog/nexthop/commit/3174a4b32336ca2a4b7b05df0ea79c6b0288515a)), closes [#82](https://github.com/SupremeCommanderHedgehog/nexthop/issues/82)
+* regex_filter transform ([9152b93](https://github.com/SupremeCommanderHedgehog/nexthop/commit/9152b933292128c67de9e345832b863e296602aa))
+* regex_filter transform ([17e6766](https://github.com/SupremeCommanderHedgehog/nexthop/commit/17e6766ee3c69d464fc2f81a25a2d2ca46c1cc65)), closes [#83](https://github.com/SupremeCommanderHedgehog/nexthop/issues/83)
+
+
+### Bug Fixes
+
+* accept IPv6 multicast addresses in the GUI validator ([0c0084a](https://github.com/SupremeCommanderHedgehog/nexthop/commit/0c0084a3a268ff57db7c9d488d1daa6334cd429c))
+* accept IPv6 multicast addresses in the GUI validator ([c13d34e](https://github.com/SupremeCommanderHedgehog/nexthop/commit/c13d34e282fad5e4f7a4b3bbe98cf23a56df0602)), closes [#85](https://github.com/SupremeCommanderHedgehog/nexthop/issues/85)
+* keep gui feature enabled through tauri dev / build ([7bc683d](https://github.com/SupremeCommanderHedgehog/nexthop/commit/7bc683daa6ecf28bcdda628de2c87890d8f3772d))
+* keep gui feature enabled through tauri dev / build ([f83f143](https://github.com/SupremeCommanderHedgehog/nexthop/commit/f83f14305c6849cc9376d058d1b63710f014d887))
+* pre-populate broadcast addresses for broadcast destinations ([bd255f7](https://github.com/SupremeCommanderHedgehog/nexthop/commit/bd255f7d103a92cacd392cbf0754db41cf944c11))
+* pre-populate broadcast addresses for broadcast destinations ([5298ebd](https://github.com/SupremeCommanderHedgehog/nexthop/commit/5298ebde39806501c80dd64047c4420586cbd8b2)), closes [#74](https://github.com/SupremeCommanderHedgehog/nexthop/issues/74)
+* red-border non-host-shaped strings in unicast host inputs ([79f2b7c](https://github.com/SupremeCommanderHedgehog/nexthop/commit/79f2b7c6b62c1e8b8454c064d2eb2e04e5c9d6f3))
+* red-border non-host-shaped strings in unicast host inputs ([2639956](https://github.com/SupremeCommanderHedgehog/nexthop/commit/263995623b93f2168c213949456df2230cea54d3)), closes [#86](https://github.com/SupremeCommanderHedgehog/nexthop/issues/86)
+* relabel multicast Mode dropdown and default source to subscriber ([3a73bb8](https://github.com/SupremeCommanderHedgehog/nexthop/commit/3a73bb8cd7ff4e8b31f2c6f5cb3edd2bbf8201b7))
+* relabel multicast Mode dropdown and default source to subscriber ([c240fa3](https://github.com/SupremeCommanderHedgehog/nexthop/commit/c240fa30131dd4f484cabe768f8b22120ff5c518)), closes [#75](https://github.com/SupremeCommanderHedgehog/nexthop/issues/75) [#76](https://github.com/SupremeCommanderHedgehog/nexthop/issues/76)
+* reset address to a sensible default when cast_mode changes ([3cbb9b5](https://github.com/SupremeCommanderHedgehog/nexthop/commit/3cbb9b55d70513c019209461162423b9b63d89a2))
+* reset address to a sensible default when cast_mode changes ([81c8667](https://github.com/SupremeCommanderHedgehog/nexthop/commit/81c8667847c8285ea7e5e291cb1ad954ed30af74)), closes [#84](https://github.com/SupremeCommanderHedgehog/nexthop/issues/84)
+
 ## [0.4.0](https://github.com/SupremeCommanderHedgehog/nexthop/compare/v0.3.0...v0.4.0) (2026-05-28)
 
 

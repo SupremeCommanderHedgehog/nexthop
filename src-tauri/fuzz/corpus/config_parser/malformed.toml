@@ -1,0 +1,5 @@
+[general
+[source]
+protocol = invalid
+mode = "server
+address = ""

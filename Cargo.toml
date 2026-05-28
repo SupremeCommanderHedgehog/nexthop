@@ -1,3 +1,8 @@
 [workspace]
 members  = ["src-tauri"]
+# The fuzz crate uses libfuzzer-sys and a nightly-only sanitizer
+# toolchain. Keeping it out of the workspace means stable `cargo
+# build`, `cargo test`, and `cargo clippy` ignore it; the dedicated
+# `.github/workflows/fuzz.yml` workflow builds it on its own.
+exclude  = ["src-tauri/fuzz"]
 resolver = "2"

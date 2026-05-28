@@ -1,0 +1,14 @@
+[general]
+[source]
+protocol = "udp"
+mode = "server"
+address = "224.0.0.1:9000"
+cast_mode = "multicast"
+multicast_interface = "0.0.0.0"
+multicast_ttl = 4
+[[destinations]]
+protocol = "udp"
+mode = "client"
+address = "239.0.0.1:9001"
+cast_mode = "multicast"
+multicast_ttl = 8

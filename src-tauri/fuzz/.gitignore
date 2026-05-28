@@ -1,0 +1,8 @@
+# cargo-fuzz build artefacts.
+target/
+# Crash inputs found by libfuzzer. We track the corpus (so coverage
+# carries across runs) but never the crashes themselves — those are
+# reproducer inputs that should be turned into committed regression
+# tests if they are interesting, not left lying in the tree.
+artifacts/
+coverage/

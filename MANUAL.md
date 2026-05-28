@@ -3,6 +3,11 @@
 A raw TCP/UDP relay with cross-protocol forwarding, multicast support, per-destination
 back-pressure, rate limiting, live config reload, and an optional graphical interface.
 
+The CLI, the TOML config schema documented below, the `/health` /
+`/stats` / `/metrics` endpoints, and the process exit codes are all
+contractual surfaces — see [COMPATIBILITY.md](COMPATIBILITY.md) for
+what counts as a breaking change.
+
 ---
 
 ## Command-line options

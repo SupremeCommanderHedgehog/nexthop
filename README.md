@@ -170,6 +170,15 @@ Dependency-Track.
 
 ---
 
+## Compatibility
+
+[COMPATIBILITY.md](COMPATIBILITY.md) defines what counts as a breaking
+change. The config schema, CLI flags, HTTP endpoints, and exit codes
+are the contractual surfaces; internal Rust APIs, log text, and the
+GUI are not. Read this before you write tooling against `nexthop`.
+
+---
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, commit conventions,

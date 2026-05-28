@@ -31,6 +31,9 @@ if-addrs           = "0.10"
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
+
 [features]
 default         = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]

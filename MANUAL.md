@@ -316,6 +316,29 @@ Combining `drop_smaller_than` and `drop_larger_than` on one
 destination implements an inclusive size range. The order does not
 matter — both check independently.
 
+### `byte_swap_16` and `byte_swap_32`
+
+Reverse byte order within each 16-bit (resp. 32-bit) word. Useful
+for bridging endian-incompatible producers and consumers.
+
+Neither transform takes any parameters:
+
+```toml
+[[destinations.transforms]]
+type = "byte_swap_16"
+
+[[destinations.transforms]]
+type = "byte_swap_32"
+```
+
+A payload whose length is not a multiple of the word size (2 for
+`byte_swap_16`, 4 for `byte_swap_32`) is **dropped** and counted
+against `dropped_validation`. A partial trailing word would corrupt
+the framing for any endian-sensitive consumer, so passing it through
+would defeat the point of the transform.
+
+Both transforms allocate a fresh `Bytes` for the swapped payload.
+
 ---
 
 ## Rate limiting

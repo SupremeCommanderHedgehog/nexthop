@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 
 use crate::config::TransformConfig;
 use crate::stats::Stats;
@@ -43,6 +43,8 @@ pub fn build_pipeline(configs: &[TransformConfig]) -> Vec<Arc<dyn Transform>> {
             TransformConfig::DropLargerThan { n_bytes } => {
                 Arc::new(DropLargerThan { n_bytes: *n_bytes }) as Arc<dyn Transform>
             }
+            TransformConfig::ByteSwap16 => Arc::new(ByteSwap16) as Arc<dyn Transform>,
+            TransformConfig::ByteSwap32 => Arc::new(ByteSwap32) as Arc<dyn Transform>,
         })
         .collect()
 }
@@ -97,6 +99,40 @@ impl Transform for DropLargerThan {
         } else {
             Decision::Pass(payload)
         }
+    }
+}
+
+/// Reverse byte order within each 16-bit word. Payloads not aligned
+/// to 2 bytes are dropped.
+pub struct ByteSwap16;
+
+impl Transform for ByteSwap16 {
+    fn apply(&self, payload: Bytes) -> Decision {
+        if !payload.len().is_multiple_of(2) {
+            return Decision::Drop;
+        }
+        let mut buf = BytesMut::with_capacity(payload.len());
+        for chunk in payload.chunks_exact(2) {
+            buf.extend_from_slice(&[chunk[1], chunk[0]]);
+        }
+        Decision::Pass(buf.freeze())
+    }
+}
+
+/// Reverse byte order within each 32-bit word. Payloads not aligned
+/// to 4 bytes are dropped.
+pub struct ByteSwap32;
+
+impl Transform for ByteSwap32 {
+    fn apply(&self, payload: Bytes) -> Decision {
+        if !payload.len().is_multiple_of(4) {
+            return Decision::Drop;
+        }
+        let mut buf = BytesMut::with_capacity(payload.len());
+        for chunk in payload.chunks_exact(4) {
+            buf.extend_from_slice(&[chunk[3], chunk[2], chunk[1], chunk[0]]);
+        }
+        Decision::Pass(buf.freeze())
     }
 }
 
@@ -195,5 +231,45 @@ mod tests {
         let stats = Stats::new("test", "", "");
         let payload = Bytes::from_static(&[1; 5]);
         assert!(apply_pipeline(&pipeline, &stats, payload).is_none());
+    }
+
+    #[test]
+    fn byte_swap_16_swaps_each_word() {
+        let payload = Bytes::from_static(&[0xAA, 0xBB, 0xCC, 0xDD]);
+        match ByteSwap16.apply(payload) {
+            Decision::Pass(out) => assert_eq!(&out[..], &[0xBB, 0xAA, 0xDD, 0xCC]),
+            Decision::Drop => panic!("expected Pass on aligned payload"),
+        }
+    }
+
+    #[test]
+    fn byte_swap_16_drops_odd_length() {
+        let payload = Bytes::from_static(&[0xAA, 0xBB, 0xCC]);
+        assert!(matches!(ByteSwap16.apply(payload), Decision::Drop));
+    }
+
+    #[test]
+    fn byte_swap_32_swaps_each_word() {
+        let payload = Bytes::from_static(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]);
+        match ByteSwap32.apply(payload) {
+            Decision::Pass(out) => {
+                assert_eq!(&out[..], &[0x04, 0x03, 0x02, 0x01, 0x08, 0x07, 0x06, 0x05])
+            }
+            Decision::Drop => panic!("expected Pass on aligned payload"),
+        }
+    }
+
+    #[test]
+    fn byte_swap_32_drops_misaligned_length() {
+        // 5 bytes — not a multiple of 4
+        let payload = Bytes::from_static(&[1, 2, 3, 4, 5]);
+        assert!(matches!(ByteSwap32.apply(payload), Decision::Drop));
+    }
+
+    #[test]
+    fn build_pipeline_constructs_byte_swap_16_and_32() {
+        let cfgs = vec![TransformConfig::ByteSwap16, TransformConfig::ByteSwap32];
+        let pipeline = build_pipeline(&cfgs);
+        assert_eq!(pipeline.len(), 2);
     }
 }

@@ -105,6 +105,9 @@ pub enum TransformConfig {
     /// Drop payloads strictly smaller than `n_bytes`. Payloads of
     /// exactly `n_bytes` pass.
     DropSmallerThan { n_bytes: usize },
+    /// Drop payloads strictly larger than `n_bytes`. Payloads of
+    /// exactly `n_bytes` pass.
+    DropLargerThan { n_bytes: usize },
 }
 
 impl std::ops::Deref for DestConfig {

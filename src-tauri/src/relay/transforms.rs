@@ -40,6 +40,9 @@ pub fn build_pipeline(configs: &[TransformConfig]) -> Vec<Arc<dyn Transform>> {
             TransformConfig::DropSmallerThan { n_bytes } => {
                 Arc::new(DropSmallerThan { n_bytes: *n_bytes }) as Arc<dyn Transform>
             }
+            TransformConfig::DropLargerThan { n_bytes } => {
+                Arc::new(DropLargerThan { n_bytes: *n_bytes }) as Arc<dyn Transform>
+            }
         })
         .collect()
 }
@@ -75,6 +78,21 @@ pub struct DropSmallerThan {
 impl Transform for DropSmallerThan {
     fn apply(&self, payload: Bytes) -> Decision {
         if payload.len() < self.n_bytes {
+            Decision::Drop
+        } else {
+            Decision::Pass(payload)
+        }
+    }
+}
+
+/// Drop payloads larger than `n_bytes`.
+pub struct DropLargerThan {
+    pub n_bytes: usize,
+}
+
+impl Transform for DropLargerThan {
+    fn apply(&self, payload: Bytes) -> Decision {
+        if payload.len() > self.n_bytes {
             Decision::Drop
         } else {
             Decision::Pass(payload)
@@ -139,6 +157,43 @@ mod tests {
         // Verify it actually drops below 8 bytes.
         let stats = Stats::new("test", "", "");
         let payload = Bytes::from_static(&[1; 7]);
+        assert!(apply_pipeline(&pipeline, &stats, payload).is_none());
+    }
+
+    #[test]
+    fn drop_larger_than_passes_at_threshold() {
+        let t = DropLargerThan { n_bytes: 4 };
+        let payload = Bytes::from_static(&[1, 2, 3, 4]);
+        match t.apply(payload.clone()) {
+            Decision::Pass(out) => assert_eq!(out, payload),
+            Decision::Drop => panic!("expected Pass at threshold"),
+        }
+    }
+
+    #[test]
+    fn drop_larger_than_passes_below_threshold() {
+        let t = DropLargerThan { n_bytes: 4 };
+        let payload = Bytes::from_static(&[1, 2, 3]);
+        match t.apply(payload.clone()) {
+            Decision::Pass(out) => assert_eq!(out, payload),
+            Decision::Drop => panic!("expected Pass below threshold"),
+        }
+    }
+
+    #[test]
+    fn drop_larger_than_drops_above_threshold() {
+        let t = DropLargerThan { n_bytes: 4 };
+        let payload = Bytes::from_static(&[1, 2, 3, 4, 5]);
+        assert!(matches!(t.apply(payload), Decision::Drop));
+    }
+
+    #[test]
+    fn build_pipeline_constructs_drop_larger_than() {
+        let cfgs = vec![TransformConfig::DropLargerThan { n_bytes: 4 }];
+        let pipeline = build_pipeline(&cfgs);
+        assert_eq!(pipeline.len(), 1);
+        let stats = Stats::new("test", "", "");
+        let payload = Bytes::from_static(&[1; 5]);
         assert!(apply_pipeline(&pipeline, &stats, payload).is_none());
     }
 }

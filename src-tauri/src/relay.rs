@@ -226,8 +226,8 @@ impl Relay {
                     error!(error = %e, "source stopped with error");
                 }
             }
-            _ = tokio::signal::ctrl_c() => {
-                info!("received Ctrl+C, shutting down");
+            sig = wait_for_shutdown_signal() => {
+                info!(signal = sig, "received shutdown signal, shutting down");
             }
         }
 
@@ -241,6 +241,39 @@ impl Relay {
         .await;
         info!("relay stopped");
         Ok(())
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════
+//  Shutdown signals
+// ════════════════════════════════════════════════════════════════════
+
+/// Wait for an OS shutdown signal and return its name for logging.
+///
+/// On Unix we listen for both SIGINT (Ctrl-C) and SIGTERM so that
+/// systemd/Kubernetes/Docker can request a clean shutdown the same way a
+/// terminal user can. On Windows only the cross-platform ctrl_c path
+/// exists.
+async fn wait_for_shutdown_signal() -> &'static str {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut sigterm) => tokio::select! {
+                _ = tokio::signal::ctrl_c() => "SIGINT",
+                _ = sigterm.recv() => "SIGTERM",
+            },
+            Err(e) => {
+                warn!(error = %e, "SIGTERM handler install failed; only SIGINT will trigger shutdown");
+                let _ = tokio::signal::ctrl_c().await;
+                "SIGINT"
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+        "Ctrl+C"
     }
 }
 

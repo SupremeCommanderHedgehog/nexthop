@@ -24,6 +24,7 @@ fn default_config() -> RelayConfig {
             channel_capacity: 1024,
             max_payload_size: 65535,
             health_port: None,
+            health_bind_addr: None,
         },
         source: EndpointConfig {
             name: None,

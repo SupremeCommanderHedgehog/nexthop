@@ -32,6 +32,15 @@ pub struct GeneralConfig {
     pub max_payload_size: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub health_port: Option<u16>,
+    /// Bind address for the health/stats/metrics HTTP server.
+    ///
+    /// `None` (the default) binds **both** `0.0.0.0` and `::` so the
+    /// server is reachable on every interface over IPv4 and IPv6.
+    /// `Some("0.0.0.0")` restricts to IPv4 only; `Some("::")` restricts
+    /// to IPv6 only; any specific IP (e.g. `"127.0.0.1"`) limits to
+    /// that interface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health_bind_addr: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -201,6 +210,14 @@ impl RelayConfig {
             ));
         }
 
+        if let Some(ref addr) = self.general.health_bind_addr {
+            addr.parse::<std::net::IpAddr>().map_err(|e| {
+                RelayError::Config(format!(
+                    "general.health_bind_addr '{addr}' is not a valid IP address: {e}"
+                ))
+            })?;
+        }
+
         Ok(())
     }
 }
@@ -281,6 +298,9 @@ pub fn to_toml_string(cfg: &RelayConfig) -> String {
     ));
     if let Some(port) = cfg.general.health_port {
         out.push_str(&format!("health_port = {port}\n"));
+    }
+    if let Some(ref addr) = cfg.general.health_bind_addr {
+        out.push_str(&format!("health_bind_addr = {}\n", toml_str(addr)));
     }
     out.push('\n');
 

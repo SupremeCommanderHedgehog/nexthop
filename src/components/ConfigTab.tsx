@@ -33,11 +33,13 @@ function Select<T extends string>({
   options,
   onChange,
   disabled,
+  labels,
 }: {
   value: T;
   options: T[];
   onChange: (v: T) => void;
   disabled?: boolean;
+  labels?: Partial<Record<T, string>>;
 }) {
   return (
     <select
@@ -48,12 +50,17 @@ function Select<T extends string>({
     >
       {options.map((o) => (
         <option key={o} value={o}>
-          {o}
+          {labels?.[o] ?? o}
         </option>
       ))}
     </select>
   );
 }
+
+const MULTICAST_MODE_LABELS: Partial<Record<EndpointMode, string>> = {
+  client: "publisher",
+  server: "subscriber",
+};
 
 function TextInput({
   value,
@@ -264,7 +271,7 @@ export default function ConfigTab({
               onChange={(v) => {
                 const patch: Partial<typeof config.source> = { cast_mode: v };
                 if (v !== "unicast") patch.protocol = "udp";
-                if (v === "multicast") patch.mode = "client";
+                if (v === "multicast") patch.mode = "server";
                 updateSource(patch);
               }}
             />
@@ -281,6 +288,11 @@ export default function ConfigTab({
               options={MODES}
               onChange={(v) => updateSource({ mode: v })}
               disabled={config.source.cast_mode === "multicast"}
+              labels={
+                config.source.cast_mode === "multicast"
+                  ? MULTICAST_MODE_LABELS
+                  : undefined
+              }
             />
           </Row>
           <Row>
@@ -445,6 +457,11 @@ export default function ConfigTab({
                         value={dest.mode}
                         options={MODES}
                         onChange={(v) => updateDest(idx, { mode: v })}
+                        labels={
+                          dest.cast_mode === "multicast"
+                            ? MULTICAST_MODE_LABELS
+                            : undefined
+                        }
                       />
                     </td>
                     <td className="px-2 py-1">

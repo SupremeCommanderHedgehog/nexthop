@@ -76,11 +76,16 @@ pub type LiveStats = Arc<ArcSwap<Vec<Arc<Stats>>>>;
 /// Atomically-readable per-destination state shared between the source's
 /// fan-out (which reads `overflow_policy` on every packet) and the
 /// destination task (which reads `reconnect_delay_ms` on each reconnect
-/// cycle). Hot-reload writes these without touching the destination task
-/// itself, so policy or delay can change without dropping connections.
+/// cycle, and the limiter on every write). Hot-reload writes these
+/// without touching the destination task itself, so policy, delay, or
+/// rate limit can change without dropping connections.
 pub struct DestRuntime {
     policy: AtomicU8,
     reconnect_delay_ms: AtomicU64,
+    /// Per-destination rate limiter override. `None` means this
+    /// destination falls back to the global limiter (see
+    /// `effective_limiter`).
+    private_limiter: RwLock<Option<Arc<RateLimiter>>>,
 }
 
 // Numeric encoding of OverflowPolicy for atomic storage.
@@ -103,10 +108,17 @@ fn u8_to_policy(v: u8) -> OverflowPolicy {
 }
 
 impl DestRuntime {
-    pub fn new(policy: OverflowPolicy, reconnect_delay_ms: u64) -> Self {
+    pub fn new(
+        policy: OverflowPolicy,
+        reconnect_delay_ms: u64,
+        rate_limit: Option<&RateLimitConfig>,
+    ) -> Self {
+        let private_limiter =
+            rate_limit.map(|rl| Arc::new(RateLimiter::new(rl.bytes_per_second, rl.burst_size)));
         Self {
             policy: AtomicU8::new(policy_to_u8(policy)),
             reconnect_delay_ms: AtomicU64::new(reconnect_delay_ms),
+            private_limiter: RwLock::new(private_limiter),
         }
     }
 
@@ -124,6 +136,35 @@ impl DestRuntime {
 
     pub fn set_reconnect_delay_ms(&self, ms: u64) {
         self.reconnect_delay_ms.store(ms, Ordering::Relaxed);
+    }
+
+    /// Install a per-destination rate limit, replacing any previous one.
+    /// Pass `None` to clear the override and fall back to the global
+    /// limiter on subsequent acquires.
+    pub fn set_private_limiter(&self, rate_limit: Option<&RateLimitConfig>) {
+        let new =
+            rate_limit.map(|rl| Arc::new(RateLimiter::new(rl.bytes_per_second, rl.burst_size)));
+        *self
+            .private_limiter
+            .write()
+            .unwrap_or_else(|p| p.into_inner()) = new;
+    }
+
+    /// Resolve the limiter the destination task should acquire from for
+    /// the next write. The per-destination override wins; otherwise we
+    /// fall back to the shared global limiter (which may itself be
+    /// empty). Both reads clone the inner `Arc` so we never hold a
+    /// `RwLockReadGuard` across an `.await`.
+    pub fn effective_limiter(&self, global: &SharedLimiter) -> Option<Arc<RateLimiter>> {
+        let priv_slot = self
+            .private_limiter
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        if priv_slot.is_some() {
+            return priv_slot;
+        }
+        global.read().unwrap_or_else(|p| p.into_inner()).clone()
     }
 }
 
@@ -187,6 +228,11 @@ pub(crate) struct DestSupervisor {
     source_stats: Arc<Stats>,
     channel_capacity: usize,
     stats_interval_secs: Arc<AtomicU64>,
+    /// Shared global limiter handle. Each destination task reads its
+    /// effective limiter via `DestRuntime::effective_limiter(global)`,
+    /// so a hot-reload swap on `global` reaches every destination
+    /// without a per-task message.
+    global_limiter: SharedLimiter,
     global_shutdown_rx: watch::Receiver<bool>,
 }
 
@@ -197,6 +243,7 @@ impl DestSupervisor {
         live_stats: LiveStats,
         channel_capacity: usize,
         stats_interval_secs: Arc<AtomicU64>,
+        global_limiter: SharedLimiter,
         global_shutdown_rx: watch::Receiver<bool>,
     ) -> Self {
         Self {
@@ -206,6 +253,7 @@ impl DestSupervisor {
             source_stats,
             channel_capacity,
             stats_interval_secs,
+            global_limiter,
             global_shutdown_rx,
         }
     }
@@ -217,6 +265,7 @@ impl DestSupervisor {
         let runtime = Arc::new(DestRuntime::new(
             cfg.overflow_policy,
             cfg.reconnect_delay_ms.unwrap_or(2000),
+            cfg.rate_limit.as_ref(),
         ));
         let (per_tx, per_rx) = watch::channel(false);
         let shutdown_tx = Arc::new(per_tx);
@@ -234,6 +283,7 @@ impl DestSupervisor {
         let stats_for_task = Arc::clone(&stats);
         let stats_interval = Arc::clone(&self.stats_interval_secs);
         let global_shutdown_for_reporter = self.global_shutdown_rx.clone();
+        let global_limiter_for_task = Arc::clone(&self.global_limiter);
         let cfg_for_task = cfg.clone();
 
         // Spawn the periodic stats reporter for this dest. It exits when
@@ -250,6 +300,7 @@ impl DestSupervisor {
             if let Err(e) = run_destination(
                 cfg_for_task,
                 runtime_for_task,
+                global_limiter_for_task,
                 rx,
                 stats_for_task.clone(),
                 combined_shutdown_rx,
@@ -346,6 +397,23 @@ impl DestSupervisor {
                     reconnect_delay_ms = ms,
                     "config reloaded: reconnect_delay_ms updated (takes effect on next reconnect)"
                 );
+            }
+            if entry.cfg.rate_limit != new_cfg.rate_limit {
+                entry
+                    .runtime
+                    .set_private_limiter(new_cfg.rate_limit.as_ref());
+                match &new_cfg.rate_limit {
+                    Some(rl) => info!(
+                        dest = %new_cfg.display_name(),
+                        bytes_per_second = rl.bytes_per_second,
+                        burst = rl.burst_size,
+                        "config reloaded: per-destination rate_limit updated"
+                    ),
+                    None => info!(
+                        dest = %new_cfg.display_name(),
+                        "config reloaded: per-destination rate_limit removed; falling back to global"
+                    ),
+                }
             }
             entry.cfg = new_cfg.clone();
         }
@@ -605,6 +673,7 @@ impl Relay {
             Arc::clone(&self.live_stats),
             cap,
             Arc::clone(&self.stats_interval_secs),
+            Arc::clone(&self.limiter),
             self.shutdown_rx.clone(),
         );
         supervisor.spawn_initial(&self.config.destinations, &self.dest_stats);
@@ -642,7 +711,6 @@ impl Relay {
             self.config.source.clone(),
             Arc::clone(&self.live_channels),
             Arc::clone(&source_stats),
-            Arc::clone(&self.limiter),
             max_payload,
             self.shutdown_rx.clone(),
         );
@@ -1043,19 +1111,18 @@ async fn run_source(
     cfg: EndpointConfig,
     channels: LiveChannels,
     stats: Arc<Stats>,
-    limiter: SharedLimiter,
     max_payload: usize,
     shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
     match (cfg.protocol, cfg.mode) {
         (Protocol::Tcp, EndpointMode::Server) => {
-            source_tcp_server(cfg, channels, stats, limiter, max_payload, shutdown).await
+            source_tcp_server(cfg, channels, stats, max_payload, shutdown).await
         }
         (Protocol::Tcp, EndpointMode::Client) => {
-            source_tcp_client(cfg, channels, stats, limiter, max_payload, shutdown).await
+            source_tcp_client(cfg, channels, stats, max_payload, shutdown).await
         }
         (Protocol::Udp, EndpointMode::Server | EndpointMode::Client) => {
-            source_udp(cfg, channels, stats, limiter, max_payload, shutdown).await
+            source_udp(cfg, channels, stats, max_payload, shutdown).await
         }
     }
 }
@@ -1066,7 +1133,6 @@ async fn source_tcp_server(
     cfg: EndpointConfig,
     channels: LiveChannels,
     stats: Arc<Stats>,
-    limiter: SharedLimiter,
     max_payload: usize,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
@@ -1085,12 +1151,11 @@ async fn source_tcp_server(
 
                 let channels = Arc::clone(&channels);
                 let stats = Arc::clone(&stats);
-                let limiter = Arc::clone(&limiter);
                 let mut sd = shutdown.clone();
 
                 tokio::spawn(async move {
                     if let Err(e) = relay_tcp_reader(
-                        stream, &channels, &stats, &limiter, max_payload, &mut sd,
+                        stream, &channels, &stats, max_payload, &mut sd,
                     ).await {
                         warn!(peer = %peer, error = %e, "source: TCP read error");
                         stats.add_error();
@@ -1110,7 +1175,6 @@ async fn source_tcp_client(
     cfg: EndpointConfig,
     channels: LiveChannels,
     stats: Arc<Stats>,
-    limiter: SharedLimiter,
     max_payload: usize,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
@@ -1124,9 +1188,7 @@ async fn source_tcp_client(
                 info!(address = %addr, "source: TCP connected");
                 stats.conn_open();
                 let mut sd = shutdown.clone();
-                let res =
-                    relay_tcp_reader(stream, &channels, &stats, &limiter, max_payload, &mut sd)
-                        .await;
+                let res = relay_tcp_reader(stream, &channels, &stats, max_payload, &mut sd).await;
                 stats.conn_close();
                 if let Err(e) = res {
                     warn!(address = %addr, error = %e, "source: TCP error");
@@ -1152,7 +1214,6 @@ async fn relay_tcp_reader(
     mut stream: TcpStream,
     channels: &LiveChannels,
     stats: &Stats,
-    limiter: &SharedLimiter,
     max_payload: usize,
     shutdown: &mut watch::Receiver<bool>,
 ) -> Result<()> {
@@ -1163,12 +1224,6 @@ async fn relay_tcp_reader(
                 let n = result?;
                 if n == 0 {
                     return Ok(());
-                }
-                // Clone the Arc out of the lock before awaiting so we never
-                // hold the RwLockReadGuard across an await point.
-                let current = limiter.read().unwrap_or_else(|p| p.into_inner()).clone();
-                if let Some(ref rl) = current {
-                    rl.acquire(n as u64).await;
                 }
                 stats.add_received(n as u64);
                 let data = Bytes::copy_from_slice(&buf[..n]);
@@ -1185,7 +1240,6 @@ async fn source_udp(
     cfg: EndpointConfig,
     channels: LiveChannels,
     stats: Arc<Stats>,
-    limiter: SharedLimiter,
     max_payload: usize,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
@@ -1243,13 +1297,7 @@ async fn source_udp(
         tokio::select! {
             msg = recv_rx.recv() => {
                 match msg {
-                    Some(data) => {
-                        let current = limiter.read().unwrap_or_else(|p| p.into_inner()).clone();
-                        if let Some(ref rl) = current {
-                            rl.acquire(data.len() as u64).await;
-                        }
-                        send_to_all(&channels, data).await;
-                    }
+                    Some(data) => send_to_all(&channels, data).await,
                     None => break,
                 }
             }
@@ -1267,6 +1315,7 @@ async fn source_udp(
 async fn run_destination(
     cfg: DestConfig,
     runtime: Arc<DestRuntime>,
+    global_limiter: SharedLimiter,
     rx: mpsc::Receiver<Bytes>,
     stats: Arc<Stats>,
     shutdown: watch::Receiver<bool>,
@@ -1274,13 +1323,34 @@ async fn run_destination(
 ) -> Result<()> {
     match (cfg.protocol, cfg.mode) {
         (Protocol::Tcp, EndpointMode::Client) => {
-            dest_tcp_client(cfg, runtime, rx, stats, shutdown).await
+            dest_tcp_client(cfg, runtime, global_limiter, rx, stats, shutdown).await
         }
         (Protocol::Tcp, EndpointMode::Server) => {
-            dest_tcp_server(cfg, rx, stats, shutdown, channel_cap).await
+            dest_tcp_server(
+                cfg,
+                runtime,
+                global_limiter,
+                rx,
+                stats,
+                shutdown,
+                channel_cap,
+            )
+            .await
         }
-        (Protocol::Udp, EndpointMode::Client) => dest_udp_client(cfg, rx, stats, shutdown).await,
-        (Protocol::Udp, EndpointMode::Server) => dest_udp_server(cfg, rx, stats, shutdown).await,
+        (Protocol::Udp, EndpointMode::Client) => {
+            dest_udp_client(cfg, runtime, global_limiter, rx, stats, shutdown).await
+        }
+        (Protocol::Udp, EndpointMode::Server) => {
+            dest_udp_server(cfg, runtime, global_limiter, rx, stats, shutdown).await
+        }
+    }
+}
+
+/// Acquire tokens from the destination's effective limiter, if any.
+/// Pulled out so each protocol's write path stays a single line.
+async fn acquire_dest_tokens(runtime: &DestRuntime, global: &SharedLimiter, n: u64) {
+    if let Some(rl) = runtime.effective_limiter(global) {
+        rl.acquire(n).await;
     }
 }
 
@@ -1289,6 +1359,7 @@ async fn run_destination(
 async fn dest_tcp_client(
     cfg: DestConfig,
     runtime: Arc<DestRuntime>,
+    global_limiter: SharedLimiter,
     mut rx: mpsc::Receiver<Bytes>,
     stats: Arc<Stats>,
     mut shutdown: watch::Receiver<bool>,
@@ -1307,6 +1378,7 @@ async fn dest_tcp_client(
                     tokio::select! {
                         msg = rx.recv() => match msg {
                             Some(data) => {
+                                acquire_dest_tokens(&runtime, &global_limiter, data.len() as u64).await;
                                 if let Err(e) = stream.write_all(&data).await {
                                     break Some(e.to_string());
                                 }
@@ -1348,6 +1420,8 @@ async fn dest_tcp_client(
 
 async fn dest_tcp_server(
     cfg: DestConfig,
+    runtime: Arc<DestRuntime>,
+    global_limiter: SharedLimiter,
     rx: mpsc::Receiver<Bytes>,
     stats: Arc<Stats>,
     mut shutdown: watch::Receiver<bool>,
@@ -1406,6 +1480,10 @@ async fn dest_tcp_server(
             msg = rx.recv() => {
                 match msg {
                     Some(data) => {
+                        // Acquire once per destination packet: a TCP-server dest's
+                        // limit is its aggregate egress to all connected peers, not
+                        // per-peer (otherwise N peers would multiply throughput).
+                        acquire_dest_tokens(&runtime, &global_limiter, data.len() as u64).await;
                         stats.msg_relayed();
                         // Snapshot senders under a brief lock so the accept task
                         // is never blocked behind the full fan-out iteration.
@@ -1471,6 +1549,8 @@ async fn write_to_peer(
 
 async fn dest_udp_client(
     cfg: DestConfig,
+    runtime: Arc<DestRuntime>,
+    global_limiter: SharedLimiter,
     mut rx: mpsc::Receiver<Bytes>,
     stats: Arc<Stats>,
     mut shutdown: watch::Receiver<bool>,
@@ -1488,6 +1568,7 @@ async fn dest_udp_client(
             msg = rx.recv() => {
                 match msg {
                     Some(data) => {
+                        acquire_dest_tokens(&runtime, &global_limiter, data.len() as u64).await;
                         match socket.send_to(&data, addr).await {
                             Ok(n) => {
                                 stats.add_sent(n as u64);
@@ -1558,7 +1639,7 @@ address  = "127.0.0.1:0"
     }
 
     fn test_runtime(policy: OverflowPolicy) -> Arc<DestRuntime> {
-        Arc::new(DestRuntime::new(policy, 2000))
+        Arc::new(DestRuntime::new(policy, 2000, None))
     }
 
     fn wrap_channels(channels: Vec<DestChannel>) -> LiveChannels {
@@ -1585,6 +1666,7 @@ address  = "127.0.0.1:0"
         let live_channels = wrap_channels(Vec::new());
         let live_stats = wrap_stats(vec![Arc::clone(&source_stats)]);
         let stats_interval_secs = Arc::new(AtomicU64::new(cfg.general.stats_interval_secs));
+        let global_limiter: SharedLimiter = Arc::new(RwLock::new(None));
 
         let mut supervisor = DestSupervisor::new(
             Arc::clone(&source_stats),
@@ -1592,12 +1674,13 @@ address  = "127.0.0.1:0"
             Arc::clone(&live_stats),
             cfg.general.channel_capacity.max(1),
             Arc::clone(&stats_interval_secs),
+            Arc::clone(&global_limiter),
             sd_rx,
         );
         supervisor.spawn_initial(&cfg.destinations, &dest_stats);
 
         HotReloadCtx {
-            limiter: Arc::new(RwLock::new(None)),
+            limiter: global_limiter,
             stats_interval_secs,
             supervisor: Arc::new(tokio::sync::Mutex::new(supervisor)),
             log_setter: noop_log_setter(),
@@ -1806,6 +1889,7 @@ address  = "127.0.0.1:0"
                 reconnect_delay_ms: None,
             },
             overflow_policy: OverflowPolicy::DropNewest,
+            rate_limit: None,
         });
 
         let ctx = test_ctx_for(&old).await;
@@ -1815,6 +1899,107 @@ address  = "127.0.0.1:0"
         let sup = ctx.supervisor.lock().await;
         assert_eq!(sup.entry_count(), 2);
         assert!(sup.entry_runtime(&added_key).is_some());
+    }
+
+    // ── Per-destination rate limit ─────────────────────────────────
+
+    fn rl_cfg(bps: u64, burst: u64) -> RateLimitConfig {
+        RateLimitConfig {
+            bytes_per_second: bps,
+            burst_size: burst,
+        }
+    }
+
+    #[test]
+    fn effective_limiter_returns_none_when_neither_set() {
+        let runtime = DestRuntime::new(OverflowPolicy::DropNewest, 2000, None);
+        let global: SharedLimiter = Arc::new(RwLock::new(None));
+        assert!(runtime.effective_limiter(&global).is_none());
+    }
+
+    #[test]
+    fn effective_limiter_uses_global_when_only_global_set() {
+        let runtime = DestRuntime::new(OverflowPolicy::DropNewest, 2000, None);
+        let global_rl = Arc::new(RateLimiter::new(1_000, 5_000));
+        let global: SharedLimiter = Arc::new(RwLock::new(Some(Arc::clone(&global_rl))));
+        let effective = runtime.effective_limiter(&global).expect("some");
+        assert!(Arc::ptr_eq(&effective, &global_rl));
+    }
+
+    #[test]
+    fn effective_limiter_uses_private_when_only_private_set() {
+        let runtime = DestRuntime::new(OverflowPolicy::DropNewest, 2000, Some(&rl_cfg(500, 1_000)));
+        let global: SharedLimiter = Arc::new(RwLock::new(None));
+        assert!(runtime.effective_limiter(&global).is_some());
+    }
+
+    #[test]
+    fn effective_limiter_private_wins_when_both_set() {
+        let runtime = DestRuntime::new(OverflowPolicy::DropNewest, 2000, Some(&rl_cfg(500, 1_000)));
+        let global_rl = Arc::new(RateLimiter::new(1_000_000, 5_000_000));
+        let global: SharedLimiter = Arc::new(RwLock::new(Some(Arc::clone(&global_rl))));
+        let effective = runtime.effective_limiter(&global).expect("some");
+        assert!(
+            !Arc::ptr_eq(&effective, &global_rl),
+            "private limiter must override global"
+        );
+    }
+
+    #[test]
+    fn set_private_limiter_clears_to_none() {
+        let runtime = DestRuntime::new(OverflowPolicy::DropNewest, 2000, Some(&rl_cfg(500, 1_000)));
+        let global: SharedLimiter = Arc::new(RwLock::new(None));
+        assert!(runtime.effective_limiter(&global).is_some());
+        runtime.set_private_limiter(None);
+        assert!(runtime.effective_limiter(&global).is_none());
+    }
+
+    #[tokio::test]
+    async fn apply_hot_reload_installs_per_dest_rate_limit() {
+        let old = test_config();
+        let mut new = test_config();
+        new.destinations[0].rate_limit = Some(rl_cfg(2_000, 8_000));
+
+        let ctx = test_ctx_for(&old).await;
+        let key = DestKey::from_cfg(&old.destinations[0]);
+        let rt = ctx
+            .supervisor
+            .lock()
+            .await
+            .entry_runtime(&key)
+            .expect("entry");
+        let global: SharedLimiter = Arc::new(RwLock::new(None));
+        assert!(rt.effective_limiter(&global).is_none());
+
+        apply_hot_reload(&old, &new, &ctx).await;
+        assert!(
+            rt.effective_limiter(&global).is_some(),
+            "per-dest limiter should be installed after hot-reload"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_hot_reload_removes_per_dest_rate_limit() {
+        let mut old = test_config();
+        old.destinations[0].rate_limit = Some(rl_cfg(2_000, 8_000));
+        let new = test_config(); // per-dest cleared, falls back to global
+
+        let ctx = test_ctx_for(&old).await;
+        let key = DestKey::from_cfg(&old.destinations[0]);
+        let rt = ctx
+            .supervisor
+            .lock()
+            .await
+            .entry_runtime(&key)
+            .expect("entry");
+        let global: SharedLimiter = Arc::new(RwLock::new(None));
+        assert!(rt.effective_limiter(&global).is_some());
+
+        apply_hot_reload(&old, &new, &ctx).await;
+        assert!(
+            rt.effective_limiter(&global).is_none(),
+            "per-dest limiter must be cleared so the dest falls back to global"
+        );
     }
 
     #[tokio::test]
@@ -1835,6 +2020,7 @@ address  = "127.0.0.1:0"
                 reconnect_delay_ms: None,
             },
             overflow_policy: OverflowPolicy::DropNewest,
+            rate_limit: None,
         });
         let mut new = old.clone();
         let removed_key = DestKey::from_cfg(&old.destinations[1]);
@@ -1865,6 +2051,7 @@ address  = "127.0.0.1:0"
                 reconnect_delay_ms: None,
             },
             overflow_policy: OverflowPolicy::DropNewest,
+            rate_limit: None,
         }
     }
 
@@ -2425,6 +2612,8 @@ address  = "0.0.0.0:7000"
 
 async fn dest_udp_server(
     cfg: DestConfig,
+    runtime: Arc<DestRuntime>,
+    global_limiter: SharedLimiter,
     rx: mpsc::Receiver<Bytes>,
     stats: Arc<Stats>,
     mut shutdown: watch::Receiver<bool>,
@@ -2476,6 +2665,10 @@ async fn dest_udp_server(
             msg = rx.recv() => {
                 match msg {
                     Some(data) => {
+                        // Same model as dest_tcp_server: acquire once per
+                        // destination packet, not per peer, so the configured
+                        // rate is the dest's aggregate egress.
+                        acquire_dest_tokens(&runtime, &global_limiter, data.len() as u64).await;
                         let addrs: Vec<SocketAddr> = {
                             peers.lock().await.iter().copied().collect()
                         };

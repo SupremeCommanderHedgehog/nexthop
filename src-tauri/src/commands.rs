@@ -51,6 +51,7 @@ fn default_config() -> RelayConfig {
                 reconnect_delay_ms: None,
             },
             overflow_policy: OverflowPolicy::DropNewest,
+            rate_limit: None,
         }],
     }
 }

@@ -79,6 +79,14 @@ pub struct DestConfig {
     pub base: EndpointConfig,
     #[serde(default)]
     pub overflow_policy: OverflowPolicy,
+    /// Per-destination rate limit. When set, it gates writes to this
+    /// destination only and overrides the global `[rate_limit]` for
+    /// this destination. When unset, the destination falls back to the
+    /// global limiter (shared across all destinations without their
+    /// own override). See MANUAL.md "Rate limiting" for the
+    /// precedence rules.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit: Option<RateLimitConfig>,
 }
 
 impl std::ops::Deref for DestConfig {
@@ -192,6 +200,13 @@ impl RelayConfig {
                              IPv4 address (use an IP address, not an interface name)"
                         )));
                     }
+                }
+            }
+            if let Some(ref rl) = d.rate_limit {
+                if rl.bytes_per_second == 0 {
+                    return Err(RelayError::Config(format!(
+                        "destination[{i}]: rate_limit.bytes_per_second must be > 0"
+                    )));
                 }
             }
         }
@@ -323,6 +338,13 @@ pub fn to_toml_string(cfg: &RelayConfig) -> String {
         write_endpoint_fields(&mut out, &dest.base);
         if dest.overflow_policy != OverflowPolicy::DropNewest {
             out.push_str("overflow_policy = \"block\"\n");
+        }
+        if let Some(ref rl) = dest.rate_limit {
+            // Inline table keeps the dest grouped in array-of-tables.
+            out.push_str(&format!(
+                "rate_limit = {{ bytes_per_second = {}, burst_size = {} }}\n",
+                rl.bytes_per_second, rl.burst_size
+            ));
         }
         out.push('\n');
     }

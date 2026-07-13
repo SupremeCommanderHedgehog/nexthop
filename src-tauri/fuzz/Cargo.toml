@@ -27,7 +27,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 bytes         = "1"
-toml          = "0.8"
+toml          = "1.1"
 # `default-features = false` drops Tauri from the dep graph. Without
 # this the fuzz crate would pull in tauri + tauri-build + GTK/WebKit
 # bindings and require the frontend `dist/` for the compile-time

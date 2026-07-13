@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import ConfigTab from "./components/ConfigTab";
 import MonitorTab from "./components/MonitorTab";
 import PrefsTab from "./components/PrefsTab";
-import type { Prefs, RelayConfig } from "./types";
+import type { Prefs, RelayConfig, RelayStoppedEvent } from "./types";
 
 type Tab = "config" | "monitor" | "prefs";
 
@@ -25,12 +26,19 @@ export default function App() {
   const [broadcastIps, setBroadcastIps] = useState<string[]>([]);
   const [version, setVersion] = useState("");
 
-  // Mirrors the latest running state for the status poll below. It is updated
-  // at every setIsRunning call site (kept synchronous so there is no lag), which
-  // lets the poll detect a running -> stopped transition without a side effect
-  // inside a state updater — updaters must be pure, and StrictMode double-invokes
-  // them in dev.
-  const isRunningRef = useRef(false);
+  // Id of the relay run the UI currently reflects. Minted client-side and set
+  // synchronously (before the start_relay round-trip) so a fast crash event
+  // can't arrive with no id to match. Used to ignore a late `relay-stopped`
+  // event from a prior run (e.g. after a quick stop→start). null when idle.
+  const currentRunIdRef = useRef<string | null>(null);
+  // Set once the user has issued a start/stop, so the mount-time status seed
+  // never overwrites a run the user began during its await.
+  const userActedRef = useRef(false);
+  // Serializes relay start/stop so the backend receives them in order. Two
+  // concurrent commands could otherwise apply out of order (e.g. a rapid
+  // start→stop where stop lands first) and strand a running relay the UI
+  // believes is stopped.
+  const relayOpRef = useRef<Promise<void>>(Promise.resolve());
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", darkMode);
@@ -48,45 +56,106 @@ export default function App() {
     }).catch(console.error);
   }, []);
 
-  // Poll relay status every 2 seconds to detect unexpected stops
+  // The backend pushes a `relay-stopped` event when the relay task exits (crash
+  // or graceful stop), so no status polling is needed. Register the listener
+  // before the initial status read to avoid missing a stop in the gap.
   useEffect(() => {
-    const id = setInterval(() => {
-      invoke<boolean>("get_relay_status")
-        .then((running) => {
-          // Detect a running -> stopped transition via the ref mirror, then keep
-          // the ref in lockstep with the state write.
-          if (isRunningRef.current && !running) {
-            setStatusMsg({ text: RELAY_STOPPED_TEXT, err: false });
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+
+    (async () => {
+      unlisten = await listen<RelayStoppedEvent>("relay-stopped", (e) => {
+        // Ignore a late event from a prior run (e.g. a quick stop→start left an
+        // old task still winding down); only the current run may change the UI.
+        if (e.payload.run_id !== currentRunIdRef.current) return;
+        currentRunIdRef.current = null;
+        setIsRunning(false);
+        // Graceful stops are already reported by handleStop; only surface a
+        // message for an unexpected (error) exit.
+        if (e.payload.error) {
+          setStatusMsg({
+            text: `Relay stopped unexpectedly: ${e.payload.error}`,
+            err: true,
+          });
+        }
+      });
+      if (cancelled) {
+        unlisten();
+        return;
+      }
+      // Sync the initial state in case the relay was already running on load.
+      try {
+        const runId = await invoke<string | null>("get_relay_status");
+        // Defer to any start/stop the user issued during this await — their
+        // handler owns currentRunIdRef in that case.
+        if (!userActedRef.current) {
+          currentRunIdRef.current = runId;
+          setIsRunning(runId !== null);
+        }
+      } catch (err) {
+        console.error(err);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
+  // Chain a relay op after any in-flight one so start/stop never overlap.
+  const runRelayOp = useCallback((op: () => Promise<void>) => {
+    relayOpRef.current = relayOpRef.current.then(op, op);
+    return relayOpRef.current;
+  }, []);
+
+  const handleStart = useCallback(
+    (config: RelayConfig) => {
+      // Mark that the user acted synchronously (before the op is scheduled) so
+      // the mount-time status seed can never race ahead and clobber this run.
+      userActedRef.current = true;
+      return runRelayOp(async () => {
+        // Ignore a start while a run is already active or starting, so we never
+        // clobber its id.
+        if (currentRunIdRef.current !== null) return;
+        // Mint the run id and claim it BEFORE the round-trip so a crash event
+        // for this run is never dropped for want of a matching id.
+        const runId = crypto.randomUUID();
+        currentRunIdRef.current = runId;
+        try {
+          await invoke("start_relay", { config, runId });
+          // Reflect running only if this run is still current — a crash event
+          // may have already fired during the round-trip and cleared the id.
+          if (currentRunIdRef.current === runId) {
+            setIsRunning(true);
+            setStatusMsg({ text: "Relay started.", err: false });
           }
-          isRunningRef.current = running;
-          setIsRunning(running);
-        })
-        .catch(console.error);
-    }, 2000);
-    return () => clearInterval(id);
-  }, []);
+        } catch (e) {
+          // Start was rejected (e.g. validation); undo our optimistic claim.
+          if (currentRunIdRef.current === runId) {
+            currentRunIdRef.current = null;
+            setIsRunning(false);
+          }
+          setStatusMsg({ text: String(e), err: true });
+        }
+      });
+    },
+    [runRelayOp]
+  );
 
-  const handleStart = useCallback(async (config: RelayConfig) => {
-    try {
-      await invoke("start_relay", { config });
-      isRunningRef.current = true;
-      setIsRunning(true);
-      setStatusMsg({ text: "Relay started.", err: false });
-    } catch (e) {
-      setStatusMsg({ text: String(e), err: true });
-    }
-  }, []);
-
-  const handleStop = useCallback(async () => {
-    try {
-      await invoke("stop_relay");
-      isRunningRef.current = false;
-      setIsRunning(false);
-      setStatusMsg({ text: RELAY_STOPPED_TEXT, err: false });
-    } catch (e) {
-      setStatusMsg({ text: String(e), err: true });
-    }
-  }, []);
+  const handleStop = useCallback(() => {
+    userActedRef.current = true;
+    return runRelayOp(async () => {
+      currentRunIdRef.current = null;
+      try {
+        await invoke("stop_relay");
+        setIsRunning(false);
+        setStatusMsg({ text: RELAY_STOPPED_TEXT, err: false });
+      } catch (e) {
+        setStatusMsg({ text: String(e), err: true });
+      }
+    });
+  }, [runRelayOp]);
 
   const tabs: { id: Tab; label: string }[] = [
     { id: "config", label: "⚙ Configuration" },

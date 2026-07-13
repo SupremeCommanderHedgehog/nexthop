@@ -94,7 +94,7 @@ jobs:
       # downloadable for triage without re-running the fuzzer.
       - name: Upload crash artifacts
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fuzz-crashes-${{ matrix.target }}
           path: src-tauri/fuzz/artifacts/${{ matrix.target }}/

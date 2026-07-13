@@ -3,3 +3,8 @@
 /dist
 /node_modules
 /src-tauri/target
+
+# Developer-local runtime config. Use config.example.toml as the template;
+# never commit machine-specific addresses or environment details.
+/nexthop.toml
+/src-tauri/nexthop.toml

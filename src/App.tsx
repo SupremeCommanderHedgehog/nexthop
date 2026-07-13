@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -14,6 +14,8 @@ export interface StatusMsg {
   err: boolean;
 }
 
+const RELAY_STOPPED_TEXT = "Relay stopped.";
+
 export default function App() {
   const [tab, setTab] = useState<Tab>("config");
   const [isRunning, setIsRunning] = useState(false);
@@ -22,6 +24,13 @@ export default function App() {
   const [localIps, setLocalIps] = useState<string[]>([]);
   const [broadcastIps, setBroadcastIps] = useState<string[]>([]);
   const [version, setVersion] = useState("");
+
+  // Mirrors the latest running state for the status poll below. It is updated
+  // at every setIsRunning call site (kept synchronous so there is no lag), which
+  // lets the poll detect a running -> stopped transition without a side effect
+  // inside a state updater — updaters must be pure, and StrictMode double-invokes
+  // them in dev.
+  const isRunningRef = useRef(false);
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", darkMode);
@@ -44,12 +53,13 @@ export default function App() {
     const id = setInterval(() => {
       invoke<boolean>("get_relay_status")
         .then((running) => {
-          setIsRunning((prev) => {
-            if (prev && !running) {
-              setStatusMsg({ text: "Relay stopped.", err: false });
-            }
-            return running;
-          });
+          // Detect a running -> stopped transition via the ref mirror, then keep
+          // the ref in lockstep with the state write.
+          if (isRunningRef.current && !running) {
+            setStatusMsg({ text: RELAY_STOPPED_TEXT, err: false });
+          }
+          isRunningRef.current = running;
+          setIsRunning(running);
         })
         .catch(console.error);
     }, 2000);
@@ -59,6 +69,7 @@ export default function App() {
   const handleStart = useCallback(async (config: RelayConfig) => {
     try {
       await invoke("start_relay", { config });
+      isRunningRef.current = true;
       setIsRunning(true);
       setStatusMsg({ text: "Relay started.", err: false });
     } catch (e) {
@@ -69,8 +80,9 @@ export default function App() {
   const handleStop = useCallback(async () => {
     try {
       await invoke("stop_relay");
+      isRunningRef.current = false;
       setIsRunning(false);
-      setStatusMsg({ text: "Relay stopped.", err: false });
+      setStatusMsg({ text: RELAY_STOPPED_TEXT, err: false });
     } catch (e) {
       setStatusMsg({ text: String(e), err: true });
     }

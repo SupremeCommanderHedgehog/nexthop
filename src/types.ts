@@ -3,6 +3,14 @@
 //   Protocol, EndpointMode, CastMode → "lowercase"  ("tcp", "udp", "server", "client", etc.)
 //   OverflowPolicy                   → "snake_case"  ("drop_newest", "block")
 
+// Mirrors RelayStoppedPayload in src-tauri/src/commands.rs — the payload of the
+// `relay-stopped` event emitted when a relay run exits. `error` is null for a
+// graceful stop and a message for an unexpected (crash) exit.
+export interface RelayStoppedEvent {
+  run_id: string;
+  error: string | null;
+}
+
 export type Protocol = "tcp" | "udp";
 export type EndpointMode = "server" | "client";
 export type CastMode = "unicast" | "broadcast" | "multicast";

@@ -10,9 +10,8 @@ use crate::prefs::Prefs;
 use crate::relay::Relay;
 use crate::stats::StatsSnapshot;
 use serde::Serialize;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tauri::State;
+use tauri::{AppHandle, Emitter, Manager, State};
 
 // ── Default config returned when nexthop.toml does not exist yet ──
 
@@ -79,9 +78,62 @@ pub fn save_config(config: RelayConfig, state: State<AppState>) -> Result<(), St
 
 // ── start_relay ───────────────────────────────────────────────────────
 
+/// Emitted to the frontend when the relay task exits. `run_id` is the
+/// client-supplied id of the run that stopped, so the UI can ignore a late event
+/// from a prior run; `error` is `None` for a graceful stop (user-initiated
+/// shutdown) and `Some(msg)` when the relay terminated on its own with an error.
+/// Lets the UI react to unexpected stops without polling.
+#[derive(Clone, Serialize)]
+struct RelayStoppedPayload {
+    run_id: String,
+    error: Option<String>,
+}
+
+/// Reaps a relay run's state and notifies the UI when its task ends — on the
+/// normal path, an error return, or a panic inside `relay.run()`. Runs exactly
+/// once when the spawned task's scope unwinds, so `Running` never gets stranded.
+struct RelayExitGuard {
+    app: AppHandle,
+    run_id: String,
+    error: Option<String>,
+}
+
+impl Drop for RelayExitGuard {
+    fn drop(&mut self) {
+        // Reap only if this run is still the current one — a newer run may have
+        // already replaced it. The lock is released before the emit below.
+        {
+            let st = self.app.state::<AppState>();
+            let mut guard = st.relay.lock().unwrap_or_else(|p| p.into_inner());
+            if let RelayState::Running {
+                run_id: ref cur, ..
+            } = *guard
+            {
+                if *cur == self.run_id {
+                    *guard = RelayState::Stopped;
+                }
+            }
+        }
+        let _ = self.app.emit(
+            "relay-stopped",
+            RelayStoppedPayload {
+                run_id: self.run_id.clone(),
+                error: self.error.take(),
+            },
+        );
+    }
+}
+
 #[tauri::command]
-pub fn start_relay(config: RelayConfig, state: State<AppState>) -> Result<(), String> {
+pub fn start_relay(
+    config: RelayConfig,
+    run_id: String,
+    state: State<AppState>,
+    app: AppHandle,
+) -> Result<(), String> {
     let mut relay_guard = state.relay.lock().map_err(|_| "state lock poisoned")?;
+    // The task reaps its own Running state on exit, so a live Running here means
+    // a relay is genuinely still up.
     if matches!(*relay_guard, RelayState::Running { .. }) {
         return Err("relay is already running".into());
     }
@@ -94,21 +146,27 @@ pub fn start_relay(config: RelayConfig, state: State<AppState>) -> Result<(), St
     let relay = Relay::new(config, config_path_str);
     let live_stats = Arc::clone(&relay.live_stats);
     let shutdown_tx = relay.shutdown_sender();
-    let done = Arc::new(AtomicBool::new(false));
-    let done_clone = Arc::clone(&done);
+    let run_id_task = run_id.clone();
 
     // spawn returns immediately; the lock is never held across an await point
     tauri::async_runtime::spawn(async move {
+        // The guard reaps state + emits `relay-stopped` when this scope exits,
+        // whether relay.run() returns Ok/Err or panics.
+        let mut exit = RelayExitGuard {
+            app,
+            run_id: run_id_task,
+            error: None,
+        };
         if let Err(e) = relay.run().await {
             tracing::error!(error = %e, "relay terminated with error");
+            exit.error = Some(e.to_string());
         }
-        done_clone.store(true, Ordering::Release);
     });
 
     *relay_guard = RelayState::Running {
+        run_id,
         shutdown_tx,
         live_stats,
-        done,
     };
     Ok(())
 }
@@ -129,20 +187,18 @@ pub fn stop_relay(state: State<AppState>) -> Result<(), String> {
 }
 
 // ── get_relay_status ──────────────────────────────────────────────────
-// Also auto-transitions Running → Stopped when the relay task has exited.
+// Returns the current run's id (for the frontend to correlate `relay-stopped`
+// events) or `None` when stopped. The running task reaps its own state on exit,
+// so no lazy transition is needed here.
 
 #[tauri::command]
-pub fn get_relay_status(state: State<AppState>) -> bool {
-    let mut relay_guard = state.relay.lock().unwrap_or_else(|p| p.into_inner());
-    let exited = if let RelayState::Running { ref done, .. } = *relay_guard {
-        done.load(Ordering::Acquire)
+pub fn get_relay_status(state: State<AppState>) -> Option<String> {
+    let relay_guard = state.relay.lock().unwrap_or_else(|p| p.into_inner());
+    if let RelayState::Running { ref run_id, .. } = *relay_guard {
+        Some(run_id.clone())
     } else {
-        false
-    };
-    if exited {
-        *relay_guard = RelayState::Stopped;
+        None
     }
-    matches!(*relay_guard, RelayState::Running { .. })
 }
 
 // ── Stats payload ─────────────────────────────────────────────────────

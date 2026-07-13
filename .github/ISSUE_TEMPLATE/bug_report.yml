@@ -1,0 +1,55 @@
+name: Bug report
+description: Report a defect in nexthop so it can be reproduced and fixed.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug. Please **do not** report
+        security vulnerabilities here — follow the private process in
+        [SECURITY.md](https://github.com/SupremeCommanderHedgehog/nexthop/blob/master/SECURITY.md).
+  - type: input
+    id: version
+    attributes:
+      label: nexthop version
+      description: Output of `nexthop --version`.
+      placeholder: e.g. 0.5.0
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows
+        - macOS
+        - Linux
+        - Other (note in description)
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug, including expected vs. actual behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Minimal steps, config, and commands needed to trigger the bug.
+      placeholder: |
+        1. Config used (redact any private addresses)
+        2. Command run
+        3. Observed result
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Paste log output (run with `log_level = "debug"` if possible). This is automatically formatted as code.
+      render: shell
+    validations:
+      required: false

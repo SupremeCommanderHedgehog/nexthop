@@ -1,0 +1,9 @@
+# Disable blank issues so reports go through the structured forms below.
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/SupremeCommanderHedgehog/nexthop/security/advisories/new
+    about: Do NOT open a public issue for security vulnerabilities. Report privately via GitHub's security advisories (see SECURITY.md).
+  - name: Question or discussion
+    url: https://github.com/SupremeCommanderHedgehog/nexthop/discussions
+    about: For usage questions and open-ended discussion rather than a specific bug or feature request.

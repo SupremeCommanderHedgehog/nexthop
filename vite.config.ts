@@ -14,8 +14,11 @@ export default defineConfig(async () => ({
   },
   envPrefix: ["VITE_", "TAURI_"],
   build: {
+    // Tailwind v4 emits modern CSS (@layer, @property, color-mix()) that needs
+    // Chrome 111+ / Safari 16.4+, so the target floor is raised to match. See
+    // the macOS minimumSystemVersion (13.3) in src-tauri/tauri.conf.json.
     target:
-      process.env.TAURI_ENV_PLATFORM === "windows" ? "chrome105" : "safari13",
+      process.env.TAURI_ENV_PLATFORM === "windows" ? "chrome111" : "safari16.4",
     minify: !process.env.TAURI_ENV_DEBUG ? "oxc" : false,
     sourcemap: !!process.env.TAURI_ENV_DEBUG,
   },

@@ -1,6 +1,9 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+
+/* Preserve the class-based dark mode from Tailwind v3 (`darkMode: "class"`).
+   v4 defaults `dark:` to prefers-color-scheme; this restores toggling via the
+   `.dark` class on <html> that App.tsx drives. */
+@custom-variant dark (&:where(.dark, .dark *));
 
 body {
   margin: 0;

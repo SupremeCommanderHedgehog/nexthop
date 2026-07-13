@@ -31,14 +31,14 @@ for running as a service or in CI pipelines.
 | Tool | Version |
 |------|---------|
 | Rust + Cargo | 1.77+ |
-| Node.js | 18+ |
+| Node.js | 20.19+ (or 22.12+) |
 | npm | 9+ |
 | Tauri CLI | v2 (installed via npm) |
 
 ### Platform prerequisites
 
 - **Windows** — WebView2 runtime (pre-installed on Windows 11; installer available from Microsoft)
-- **macOS** — Xcode Command Line Tools
+- **macOS** — Xcode Command Line Tools; **macOS 13.3 (Ventura) or newer** — the UI uses Tailwind CSS v4, which requires a Safari 16.4+ WebKit engine (Safari 16.4 shipped in macOS 13.3)
 - **Linux** — `libwebkit2gtk-4.1`, `libgtk-3`, `libayatana-appindicator3` (or `libappindicator3`)
 
 ---

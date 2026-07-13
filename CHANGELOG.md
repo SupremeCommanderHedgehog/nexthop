@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While `nexthop` is pre-1.0, **minor** version bumps may include breaking changes;
 **patch** version bumps are backwards-compatible only.
 
+## [0.6.2](https://github.com/SupremeCommanderHedgehog/nexthop/compare/v0.6.1...v0.6.2) (2026-07-13)
+
+
+### Bug Fixes
+
+* **frontend:** make relay-status poll updater pure (App.tsx) ([1e101e7](https://github.com/SupremeCommanderHedgehog/nexthop/commit/1e101e75d9eb0b6462f2c7d9157477e76464ede9))
+* **frontend:** make relay-status poll updater pure (App.tsx) ([aebd184](https://github.com/SupremeCommanderHedgehog/nexthop/commit/aebd184a28e8e84909255777bcc80c0b06081d33)), closes [#150](https://github.com/SupremeCommanderHedgehog/nexthop/issues/150)
+* **relay:** eliminate status races with run-id-tagged events ([86bd2a2](https://github.com/SupremeCommanderHedgehog/nexthop/commit/86bd2a2b5b9e789d3c0125f87123a0fdba06d9cf))
+* **relay:** eliminate status races with run-id-tagged events ([8ad4337](https://github.com/SupremeCommanderHedgehog/nexthop/commit/8ad4337621261236a1c6d9b2e3768cc2bc8d4298)), closes [#155](https://github.com/SupremeCommanderHedgehog/nexthop/issues/155)
+
 ## [0.6.1](https://github.com/SupremeCommanderHedgehog/nexthop/compare/v0.6.0...v0.6.1) (2026-07-13)
 
 

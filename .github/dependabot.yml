@@ -1,5 +1,9 @@
 # Dependabot keeps dependencies patched across every ecosystem this repo
 # uses. See https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+#
+# Each ecosystem batches its minor + patch bumps into a single grouped PR
+# ("<ecosystem>-minor") to keep the PR count down; major bumps are left
+# ungrouped so each one gets a deliberate, individual review.
 version: 2
 updates:
   # Rust workspace (root Cargo.toml + the src-tauri member crate).
@@ -11,6 +15,12 @@ updates:
     commit-message:
       prefix: build
       include: scope
+    groups:
+      cargo-minor:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch
 
   # The fuzz crate is excluded from the workspace, so it needs its own entry.
   - package-ecosystem: cargo
@@ -21,6 +31,12 @@ updates:
     commit-message:
       prefix: build
       include: scope
+    groups:
+      cargo-fuzz-minor:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch
 
   # Frontend (Tauri v2 + React) npm dependencies.
   - package-ecosystem: npm
@@ -31,6 +47,12 @@ updates:
     commit-message:
       prefix: build
       include: scope
+    groups:
+      npm-minor:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch
 
   # GitHub Actions used by the workflows in .github/workflows.
   - package-ecosystem: github-actions
@@ -40,3 +62,9 @@ updates:
     commit-message:
       prefix: ci
       include: scope
+    groups:
+      actions-minor:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch

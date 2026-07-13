@@ -30,7 +30,7 @@ thiserror          = "2"
 clap               = { version = "4", features = ["derive"] }
 notify             = "8"
 futures            = "0.3"
-if-addrs           = "0.10"
+if-addrs           = "0.15"
 arc-swap           = "1"
 regex              = "1"
 

@@ -43,7 +43,7 @@ jobs:
       matrix:
         target: [config_parser, source_read]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Pick run duration
         id: duration

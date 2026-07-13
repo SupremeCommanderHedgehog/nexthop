@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While `nexthop` is pre-1.0, **minor** version bumps may include breaking changes;
 **patch** version bumps are backwards-compatible only.
 
+## [0.6.1](https://github.com/SupremeCommanderHedgehog/nexthop/compare/v0.6.0...v0.6.1) (2026-07-13)
+
+
+### Bug Fixes
+
+* **frontend:** add src/vite-env.d.ts for vite/client ambient types ([98d99a7](https://github.com/SupremeCommanderHedgehog/nexthop/commit/98d99a76d5696806e53dcfa0486a2ee8e199075f))
+* **frontend:** add src/vite-env.d.ts for vite/client ambient types ([eced04d](https://github.com/SupremeCommanderHedgehog/nexthop/commit/eced04dad9613056c5927b6990b002da32fe3f71)), closes [#146](https://github.com/SupremeCommanderHedgehog/nexthop/issues/146)
+
 ## [0.6.0](https://github.com/SupremeCommanderHedgehog/nexthop/compare/v0.5.0...v0.6.0) (2026-07-13)
 
 

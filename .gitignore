@@ -4,6 +4,11 @@
 /node_modules
 /src-tauri/target
 
+# Tauri codegen output. Regenerated on every build and named per build host
+# (linux-schema.json, windows-schema.json, ...), so it dirties the tree
+# differently depending on who built last.
+/src-tauri/gen/schemas
+
 # Developer-local runtime config. Use config.example.toml as the template;
 # never commit machine-specific addresses or environment details.
 /nexthop.toml

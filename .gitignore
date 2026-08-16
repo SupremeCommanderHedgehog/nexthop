@@ -8,3 +8,17 @@
 # never commit machine-specific addresses or environment details.
 /nexthop.toml
 /src-tauri/nexthop.toml
+
+# Secret material — never commit. A relay that terminates TLS or signs Tauri
+# updates is exactly where a stray key ends up.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx
+*.p12
+id_rsa
+id_ed25519
+secrets.*
+credentials.*

@@ -69,7 +69,7 @@ jobs:
       # cargo-fuzz` pins old `rustix 0.36.x`, which uses perma-unstable
       # rustc attributes that current nightly rejects. taiki-e's install
       # action pulls a release binary and skips the compile entirely.
-      - uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2
+      - uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532 # v2
         with:
           tool: cargo-fuzz
 

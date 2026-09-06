@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While `nexthop` is pre-1.0, **minor** version bumps may include breaking changes;
 **patch** version bumps are backwards-compatible only.
 
+## [0.6.3](https://github.com/SupremeCommanderHedgehog/nexthop/compare/v0.6.2...v0.6.3) (2026-09-06)
+
+
+### Bug Fixes
+
+* use as_chunks in byte-swap transforms for clippy 1.98 ([#188](https://github.com/SupremeCommanderHedgehog/nexthop/issues/188)) ([f1df2ec](https://github.com/SupremeCommanderHedgehog/nexthop/commit/f1df2ec1e78b1f6cf6840909bb2df09ac2b3c966))
+
 ## [0.6.2](https://github.com/SupremeCommanderHedgehog/nexthop/compare/v0.6.1...v0.6.2) (2026-07-13)
 
 

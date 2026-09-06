@@ -129,7 +129,7 @@ impl Transform for ByteSwap16 {
             return Decision::Drop;
         }
         let mut buf = BytesMut::with_capacity(payload.len());
-        for chunk in payload.chunks_exact(2) {
+        for chunk in payload.as_chunks::<2>().0 {
             buf.extend_from_slice(&[chunk[1], chunk[0]]);
         }
         Decision::Pass(buf.freeze())
@@ -146,7 +146,7 @@ impl Transform for ByteSwap32 {
             return Decision::Drop;
         }
         let mut buf = BytesMut::with_capacity(payload.len());
-        for chunk in payload.chunks_exact(4) {
+        for chunk in payload.as_chunks::<4>().0 {
             buf.extend_from_slice(&[chunk[3], chunk[2], chunk[1], chunk[0]]);
         }
         Decision::Pass(buf.freeze())

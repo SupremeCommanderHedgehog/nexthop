@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While `nexthop` is pre-1.0, **minor** version bumps may include breaking changes;
 **patch** version bumps are backwards-compatible only.
 
+## [0.6.4](https://github.com/SupremeCommanderHedgehog/nexthop/compare/v0.6.3...v0.6.4) (2026-10-02)
+
+
+### Bug Fixes
+
+* use AtomicU64::update instead of deprecated fetch_update for Rust 1.99 ([#206](https://github.com/SupremeCommanderHedgehog/nexthop/issues/206)) ([8e7bf01](https://github.com/SupremeCommanderHedgehog/nexthop/commit/8e7bf01259f003b40157d705964c99442f202302))
+
 ## [0.6.3](https://github.com/SupremeCommanderHedgehog/nexthop/compare/v0.6.2...v0.6.3) (2026-09-06)
 
 

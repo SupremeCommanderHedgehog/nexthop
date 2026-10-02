@@ -135,10 +135,9 @@ impl Stats {
 
     pub fn conn_close(&self) {
         self.active_connections
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
-                Some(v.saturating_sub(1))
-            })
-            .ok();
+            .update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                v.saturating_sub(1)
+            });
     }
 
     pub fn snapshot(&self) -> StatsSnapshot {

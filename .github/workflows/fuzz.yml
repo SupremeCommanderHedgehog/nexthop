@@ -61,7 +61,7 @@ jobs:
       # false`, which drops Tauri (and `tauri::generate_context!`,
       # which would otherwise demand a built `dist/` at compile time).
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: "src-tauri/fuzz -> target"
 
@@ -69,7 +69,7 @@ jobs:
       # cargo-fuzz` pins old `rustix 0.36.x`, which uses perma-unstable
       # rustc attributes that current nightly rejects. taiki-e's install
       # action pulls a release binary and skips the compile entirely.
-      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
         with:
           tool: cargo-fuzz
 
@@ -92,7 +92,7 @@ jobs:
       # downloadable for triage without re-running the fuzzer.
       - name: Upload crash artifacts
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: fuzz-crashes-${{ matrix.target }}
           path: src-tauri/fuzz/artifacts/${{ matrix.target }}/

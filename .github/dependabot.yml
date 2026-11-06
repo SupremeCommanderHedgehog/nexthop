@@ -1,17 +1,26 @@
 # Dependabot keeps dependencies patched across every ecosystem this repo
 # uses. See https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
 #
-# Each ecosystem batches its minor + patch bumps into a single grouped PR
-# ("<ecosystem>-minor") to keep the PR count down; major bumps are left
-# ungrouped so each one gets a deliberate, individual review.
+# Version updates run monthly, and each ecosystem batches its minor and
+# patch bumps into one grouped PR ("<ecosystem>-minor"), so routine churn
+# is at most three PRs a month. Major bumps stay ungrouped so each one
+# gets its own review.
+#
+# Security updates are not affected by this schedule: Dependabot opens
+# them as soon as an advisory is published, and cargo-deny / npm audit
+# in CI also catch advisories between runs.
 version: 2
 updates:
-  # Rust workspace (root Cargo.toml + the src-tauri member crate).
+  # Rust: the workspace (root + src-tauri) and the standalone fuzz crate,
+  # which sits outside the workspace with its own Cargo.lock. Listing
+  # both directories in one entry puts them in the same grouped PR.
   - package-ecosystem: cargo
-    directory: "/"
+    directories:
+      - "/"
+      - "/src-tauri/fuzz"
     schedule:
-      interval: weekly
-    open-pull-requests-limit: 10
+      interval: monthly
+    open-pull-requests-limit: 5
     commit-message:
       prefix: build
       include: scope
@@ -22,28 +31,12 @@ updates:
           - minor
           - patch
 
-  # The fuzz crate is excluded from the workspace, so it needs its own entry.
-  - package-ecosystem: cargo
-    directory: "/src-tauri/fuzz"
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
-    commit-message:
-      prefix: build
-      include: scope
-    groups:
-      cargo-fuzz-minor:
-        applies-to: version-updates
-        update-types:
-          - minor
-          - patch
-
   # Frontend (Tauri v2 + React) npm dependencies.
   - package-ecosystem: npm
     directory: "/"
     schedule:
-      interval: weekly
-    open-pull-requests-limit: 10
+      interval: monthly
+    open-pull-requests-limit: 5
     commit-message:
       prefix: build
       include: scope
@@ -58,7 +51,7 @@ updates:
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
-      interval: weekly
+      interval: monthly
     commit-message:
       prefix: ci
       include: scope

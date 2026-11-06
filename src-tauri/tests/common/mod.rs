@@ -13,9 +13,9 @@
 #![allow(dead_code)]
 
 use std::io::Write;
-use std::net::{TcpListener, UdpSocket};
+use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::process::{Child, Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Pick an OS-assigned free port on `127.0.0.1` and immediately drop
 /// the binder so the relay can rebind. There is a small race window
@@ -263,6 +263,35 @@ pub fn temp_config_path(label: &str) -> std::path::PathBuf {
 /// tasks in well under a second on every CI runner we use, but this is
 /// the upper bound we trust.
 pub const STARTUP_DELAY: Duration = Duration::from_secs(1);
+
+/// Upper bound for [`connect_tcp_when_ready`]. Generous because slow
+/// CI runners can take well over [`STARTUP_DELAY`] to spawn the relay
+/// binary and bind its listener; a healthy run returns in milliseconds.
+pub const TCP_READY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Connect to the relay's TCP source listener on `127.0.0.1:port`,
+/// retrying "connection refused" until [`TCP_READY_TIMEOUT`] elapses.
+///
+/// Prefer this over sleeping for [`STARTUP_DELAY`] and connecting once:
+/// a fixed sleep races the relay's startup and fails on slow runners.
+/// A successful connect also means the relay is ready to forward,
+/// because `Relay::run` seeds the destination channels before it
+/// spawns the source.
+pub fn connect_tcp_when_ready(port: u16) -> TcpStream {
+    let addr = format!("127.0.0.1:{port}");
+    let deadline = Instant::now() + TCP_READY_TIMEOUT;
+    loop {
+        match TcpStream::connect(&addr) {
+            Ok(s) => return s,
+            Err(_) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => {
+                panic!("connect {addr}: relay not listening after {TCP_READY_TIMEOUT:?}: {e}")
+            }
+        }
+    }
+}
 
 /// Wait window after rewriting the config file. The relay's `notify`
 /// watcher has a 200 ms debounce; we leave plenty of slack for FS

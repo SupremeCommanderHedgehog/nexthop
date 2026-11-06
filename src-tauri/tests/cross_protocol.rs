@@ -12,7 +12,7 @@ mod common;
 
 use common::*;
 use std::io::Write as _;
-use std::net::{TcpStream, UdpSocket};
+use std::net::UdpSocket;
 use std::time::Duration;
 
 #[test]
@@ -39,10 +39,9 @@ fn tcp_source_to_udp_destination_delivers_bytes() {
         config: config_path.clone(),
     };
 
-    // Let the relay bind its TCP listener.
-    std::thread::sleep(STARTUP_DELAY);
-
-    let mut tcp = TcpStream::connect(format!("127.0.0.1:{source_port}")).expect("connect source");
+    // Retry until the relay has bound its TCP listener; a fixed sleep
+    // here raced startup on slow CI runners.
+    let mut tcp = connect_tcp_when_ready(source_port);
     let payload = b"cross-protocol-payload";
     tcp.write_all(payload).expect("write payload");
     tcp.flush().expect("flush");
